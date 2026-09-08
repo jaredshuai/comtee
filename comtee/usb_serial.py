@@ -112,7 +112,11 @@ class UsbSerial:
 
     def present(self) -> frozenset[UsbIdentity]:
         """此刻现场插着的 USB 身份。"""
-        return frozenset(usb_identity_paths(self._list_ports()))
+        return frozenset(self.paths())
+
+    def paths(self) -> dict[UsbIdentity, str]:
+        """USB 身份到此刻 COM 路径。"""
+        return usb_identity_paths(self._list_ports())
 
     def watch(self, on_change: Callable[[], None]) -> None:
         """插拔变化时由调用方触发对照。"""

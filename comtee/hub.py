@@ -53,6 +53,8 @@ class LineStatus:
     serial_params: SerialParams
     decode: str
     hold: LineHold
+    human_clients: int
+    agent_connected: bool
 
 
 @dataclass(frozen=True)
@@ -257,6 +259,18 @@ class Comtee:
         self._serial.release(line.device)
         self._persist()
 
+    def shutdown(self) -> None:
+        """放掉所有占口，不拆线路、不改存档。"""
+        for line in self._lines.values():
+            if line.hold == LineHold.HELD:
+                self._serial.release(line.device)
+            line.hold = LineHold.WAITING
+            line.clients.clear()
+
+    def refresh(self) -> None:
+        """对照现场插着的设备，进入等待或再占口。"""
+        self._reconcile()
+
     def _restore(self) -> None:
         """从存档恢复线路并再占口。"""
         for record in self._store.load():
@@ -359,6 +373,8 @@ class Comtee:
             serial_params=line.serial_params,
             decode=line.decode,
             hold=line.hold,
+            human_clients=sum(1 for item in line.clients if isinstance(item, Client)),
+            agent_connected=any(isinstance(item, Agent) for item in line.clients),
         )
 
     def _decode_of(self, human_entry: int) -> str:

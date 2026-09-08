@@ -579,3 +579,46 @@ def test_Agent必须指名线路串通不猜设备() -> None:
     assert agent.received() == "AAA"
     with pytest.raises(KeyError):
         hub.attach_agent(9999)
+
+
+def test_列出线路能看见谁连着() -> None:
+    """面板要看人端数量和有没有 Agent，不看字节流。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+
+    [empty] = hub.list_lines()
+    assert empty.human_clients == 0
+    assert empty.agent_connected is False
+
+    first = hub.attach_client(2222)
+    hub.attach_client(2222)
+    hub.attach_agent(2222)
+    [busy] = hub.list_lines()
+    assert busy.human_clients == 2
+    assert busy.agent_connected is True
+
+    first.leave()
+    [after] = hub.list_lines()
+    assert after.human_clients == 1
+    assert after.agent_connected is True
+
+
+def test_退出放口但不拆编排() -> None:
+    """托盘退出才放口；存档里的线路还在，再打开会再占。"""
+    store = MemoryStore()
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, store)
+    hub.create_line(2222, device)
+    hub.shutdown()
+
+    assert hub.list_lines()[0].human_entry == 2222
+    assert not serial.is_held(device)
+
+    revived = FakeSerial()
+    revived.plug(device)
+    restored = Comtee(revived, store)
+    assert restored.list_lines()[0].hold == LineHold.HELD
+    assert revived.is_held(device)
