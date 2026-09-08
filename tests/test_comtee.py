@@ -37,11 +37,44 @@ class FakeSerial:
         self._busy: set[UsbIdentity] = set()
         self._held: dict[UsbIdentity, SerialParams] = {}
         self._written: dict[UsbIdentity, bytearray] = {}
+        self._ingress: dict[UsbIdentity, bytearray] = {}
         self._listeners: dict[UsbIdentity, Callable[[bytes], None]] = {}
+        self._paths: dict[UsbIdentity, str] = {}
+        self._occupied_path: dict[UsbIdentity, str] = {}
+        self._on_change: Callable[[], None] | None = None
 
-    def plug(self, device: UsbIdentity) -> None:
-        """让该 USB 身份出现在现场。"""
+    def plug(self, device: UsbIdentity, path: str = "COM6") -> None:
+        """让该 USB 身份出现在现场；路径可变。"""
         self._present.add(device)
+        self._paths[device] = path
+        self._notify()
+
+    def unplug(self, device: UsbIdentity) -> None:
+        """拔掉该 USB 身份。"""
+        self._present.discard(device)
+        self._paths.pop(device, None)
+        self._notify()
+
+    def present(self) -> frozenset[UsbIdentity]:
+        """此刻现场插着的 USB 身份。"""
+        return frozenset(self._present)
+
+    def watch(self, on_change: Callable[[], None]) -> None:
+        """登记插拔通知。"""
+        self._on_change = on_change
+
+    def path_of(self, device: UsbIdentity) -> str:
+        """此刻枚举到的路径。"""
+        return self._paths[device]
+
+    def occupied_path(self, device: UsbIdentity) -> str:
+        """最近一次占口时用的路径。"""
+        return self._occupied_path[device]
+
+    def _notify(self) -> None:
+        """有人在听时上报插拔。"""
+        if self._on_change is not None:
+            self._on_change()
 
     def mark_busy(self, device: UsbIdentity) -> None:
         """模拟设备已被别人占用、打不开。"""
@@ -55,6 +88,7 @@ class FakeSerial:
             return LineHold.CONFLICT
         self._held[device] = params
         self._written[device] = bytearray()
+        self._occupied_path[device] = self._paths[device]
         return LineHold.HELD
 
     def release(self, device: UsbIdentity) -> None:
@@ -62,6 +96,7 @@ class FakeSerial:
         self._held.pop(device, None)
         self._written.pop(device, None)
         self._listeners.pop(device, None)
+        self._occupied_path.pop(device, None)
 
     def listen(self, device: UsbIdentity, on_bytes: Callable[[bytes], None]) -> None:
         """登记设备字节回调。"""
@@ -69,15 +104,24 @@ class FakeSerial:
 
     def write(self, device: UsbIdentity, data: bytes) -> None:
         """记下打进设备的原字节。"""
-        self._written[device].extend(data)
+        self._ingress.setdefault(device, bytearray()).extend(data)
+        held = self._written.get(device)
+        if held is not None:
+            held.extend(data)
 
     def emit(self, device: UsbIdentity, data: bytes) -> None:
         """模拟设备打出原字节。"""
-        self._listeners[device](data)
+        listener = self._listeners.get(device)
+        if listener is not None:
+            listener(data)
 
     def written(self, device: UsbIdentity) -> bytes:
         """取出已打进设备的原字节。"""
-        return bytes(self._written[device])
+        return bytes(self._written.get(device, b""))
+
+    def ingress(self, device: UsbIdentity) -> bytes:
+        """串通过适配器写下的全部字节，放口后仍保留。"""
+        return bytes(self._ingress.get(device, b""))
 
     def is_held(self, device: UsbIdentity) -> bool:
         """该设备此刻是否被串通占着。"""
@@ -332,3 +376,85 @@ def test_离开的客户端再写不会进设备() -> None:
 
     assert serial.written(device) == b""
     assert first.received() == b""
+
+
+def test_拔掉USB后线路还在客户端不断开且为等待设备() -> None:
+    """USB 消失不拆线路、不踢客户端，状态是等待设备而不是占用冲突。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    client = hub.attach_client(2222)
+
+    serial.unplug(device)
+
+    [line] = hub.list_lines()
+    assert line.human_entry == 2222
+    assert line.device == device
+    assert line.hold == LineHold.WAITING
+    assert line.hold != LineHold.CONFLICT
+    assert not serial.is_held(device)
+    client.write(b"still-attached")
+    peer = hub.attach_client(2222)
+    client.write(b"ping")
+    assert peer.received() == b"ping"
+
+
+def test_等待设备期间写入不进设备且不踢客户端() -> None:
+    """等待时写下的忽略进设备，线路与客户端都还在。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    client = hub.attach_client(2222)
+    peer = hub.attach_client(2222)
+    serial.unplug(device)
+
+    client.write(b"ignored")
+
+    [line] = hub.list_lines()
+    assert line.hold == LineHold.WAITING
+    assert not serial.is_held(device)
+    assert serial.ingress(device) == b""
+    assert peer.received() == b"ignored"
+
+
+def test_同一USB身份插回后即使路径变了也再占口() -> None:
+    """插回同一身份则再占口，设备字节重新流动。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    client = hub.attach_client(2222)
+    serial.unplug(device)
+
+    serial.plug(device, path="COM9")
+    serial.emit(device, b"back")
+    client.write(b"up")
+
+    [line] = hub.list_lines()
+    assert line.hold == LineHold.HELD
+    assert serial.is_held(device)
+    assert serial.occupied_path(device) == "COM9"
+    assert client.received() == b"back"
+    assert serial.written(device) == b"up"
+
+
+def test_另一台设备再现不会误接到这条线路() -> None:
+    """等待中的线路只认自己的 USB 身份。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    client = hub.attach_client(2222)
+    serial.unplug(device)
+    stranger = UsbIdentity(vid=0x0403, pid=0x6001, serial="OTHER")
+    serial.plug(stranger, path="COM7")
+    serial.emit(stranger, b"nope")
+
+    [line] = hub.list_lines()
+    assert line.device == device
+    assert line.hold == LineHold.WAITING
+    assert not serial.is_held(device)
+    assert not serial.is_held(stranger)
+    assert client.received() == b""

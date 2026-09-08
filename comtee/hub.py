@@ -78,6 +78,14 @@ class SerialPort(Protocol):
         """把客户端写下的原字节打进设备。"""
         ...
 
+    def present(self) -> frozenset[UsbIdentity]:
+        """此刻现场插着的 USB 身份。"""
+        ...
+
+    def watch(self, on_change: Callable[[], None]) -> None:
+        """插拔变化时通知串通去对照现场。"""
+        ...
+
 
 class ArrangementStore(Protocol):
     """线路编排的持久存档。"""
@@ -139,6 +147,7 @@ class Comtee:
         self._serial = serial
         self._store = store
         self._lines: dict[int, _Line] = {}
+        self._serial.watch(self._reconcile)
         self._restore()
 
     def create_line(self, human_entry: int, device: UsbIdentity) -> None:
@@ -219,6 +228,22 @@ class Comtee:
             line.device,
             lambda data: self._on_device_bytes(entry, data),
         )
+
+    def _reconcile(self) -> None:
+        """对照现场插着的设备：消失则等待，同一身份再现则再占口。"""
+        present = self._serial.present()
+        for line in self._lines.values():
+            if line.device not in present:
+                if line.hold == LineHold.HELD:
+                    self._serial.release(line.device)
+                line.hold = LineHold.WAITING
+                continue
+            if line.hold == LineHold.HELD:
+                continue
+            if line.hold != LineHold.WAITING:
+                continue
+            line.hold = self._serial.occupy(line.device, line.serial_params)
+            self._bind_device(line)
 
     def _on_device_bytes(self, human_entry: int, data: bytes) -> None:
         """设备字节以原样送到每个已挂客户端。"""
