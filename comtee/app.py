@@ -14,6 +14,7 @@ from comtee.native_window import install_hide_on_close
 from comtee.panel import build_panel
 from comtee.persist import FileArrangementStore, UserSettings
 from comtee.singleton import InstanceLock
+from comtee.telnet import TelnetEntries
 from comtee.usb_serial import UsbSerial, windows_usb_serial
 
 _TITLE = "串通"
@@ -29,9 +30,11 @@ def run() -> None:
 
     data_dir = Path(os.environ.get("LOCALAPPDATA", ".")) / "comtee"
     adapter: UsbSerial = windows_usb_serial()
+    human = TelnetEntries()
     hub = Comtee(
         adapter,
         FileArrangementStore(data_dir / "lines.json"),
+        human=human,
     )
     command = f'"{sys.executable}" -m comtee'
     autostart = PreferredAutoStart(
@@ -80,6 +83,7 @@ def run() -> None:
 
     build_panel(hub, list_paths, autostart)
     app.on_startup(start_tray)
+    app.on_shutdown(human.shutdown)
     app.on_shutdown(hub.shutdown)
     install_hide_on_close()
     ui.run(

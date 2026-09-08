@@ -1,5 +1,7 @@
 """串通：人端入口与设备一对一编排，线路在则占口。"""
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -107,6 +109,22 @@ class ArrangementStore(Protocol):
         ...
 
 
+class HumanListener(Protocol):
+    """在本机回环上听人端入口。"""
+
+    def attach(self, hub: Comtee) -> None:
+        """接到串通，连上后挂客户端。"""
+        ...
+
+    def occupy(self, human_entry: int) -> bool:
+        """开始听该人端入口；听成了为 True。"""
+        ...
+
+    def release(self, human_entry: int) -> None:
+        """停掉该人端入口。"""
+        ...
+
+
 @dataclass
 class _Line:
     """一条线路的内部记录。"""
@@ -191,11 +209,19 @@ class Agent:
 class Comtee:
     """串通模块：编排线路、列出状态；占口与恢复藏在实现里。"""
 
-    def __init__(self, serial: SerialPort, store: ArrangementStore) -> None:
-        """注入串口与编排存档适配器，并恢复上一份编排。"""
+    def __init__(
+        self,
+        serial: SerialPort,
+        store: ArrangementStore,
+        human: HumanListener | None = None,
+    ) -> None:
+        """注入串口、编排存档；人端入口可选。"""
         self._serial = serial
         self._store = store
+        self._human = human
         self._lines: dict[int, _Line] = {}
+        if human is not None:
+            human.attach(self)
         self._serial.watch(self._reconcile)
         self._restore()
 
@@ -255,6 +281,8 @@ class Comtee:
 
     def remove_line(self, human_entry: int) -> None:
         """拆掉线路，放口并停掉该人端入口。"""
+        if self._human is not None:
+            self._human.release(human_entry)
         line = self._lines.pop(human_entry)
         self._serial.release(line.device)
         self._persist()
@@ -288,6 +316,8 @@ class Comtee:
         )
         self._lines[record.human_entry] = line
         self._bind_device(line)
+        if self._human is not None:
+            self._human.occupy(record.human_entry)
 
     def _bind_device(self, line: _Line) -> None:
         """占口成功后把设备字节接到这条线路的扇出上。"""
