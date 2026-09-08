@@ -1,5 +1,7 @@
 """串通模块缝：假设备上编排线路并占口。"""
 
+from collections.abc import Callable
+
 import pytest
 
 from comtee import (
@@ -34,6 +36,8 @@ class FakeSerial:
         self._present: set[UsbIdentity] = set()
         self._busy: set[UsbIdentity] = set()
         self._held: dict[UsbIdentity, SerialParams] = {}
+        self._written: dict[UsbIdentity, bytearray] = {}
+        self._listeners: dict[UsbIdentity, Callable[[bytes], None]] = {}
 
     def plug(self, device: UsbIdentity) -> None:
         """让该 USB 身份出现在现场。"""
@@ -50,11 +54,30 @@ class FakeSerial:
         if device in self._busy:
             return LineHold.CONFLICT
         self._held[device] = params
+        self._written[device] = bytearray()
         return LineHold.HELD
 
     def release(self, device: UsbIdentity) -> None:
         """放掉该设备。"""
         self._held.pop(device, None)
+        self._written.pop(device, None)
+        self._listeners.pop(device, None)
+
+    def listen(self, device: UsbIdentity, on_bytes: Callable[[bytes], None]) -> None:
+        """登记设备字节回调。"""
+        self._listeners[device] = on_bytes
+
+    def write(self, device: UsbIdentity, data: bytes) -> None:
+        """记下打进设备的原字节。"""
+        self._written[device].extend(data)
+
+    def emit(self, device: UsbIdentity, data: bytes) -> None:
+        """模拟设备打出原字节。"""
+        self._listeners[device](data)
+
+    def written(self, device: UsbIdentity) -> bytes:
+        """取出已打进设备的原字节。"""
+        return bytes(self._written[device])
 
     def is_held(self, device: UsbIdentity) -> bool:
         """该设备此刻是否被串通占着。"""
@@ -225,3 +248,87 @@ def test_拆掉的线路重启后不再恢复() -> None:
 
     assert restored.list_lines() == ()
     assert not restarted.is_held(device)
+
+
+def test_设备字节以原样到达每个已挂客户端() -> None:
+    """同一线路上多个人端都能收到设备上来的原字节。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    first = hub.attach_client(2222)
+    second = hub.attach_client(2222)
+
+    payload = b"\x00\xff\x1b[32mOK\r\n"
+    serial.emit(device, payload)
+
+    assert first.received() == payload
+    assert second.received() == payload
+
+
+def test_客户端写入以原样到达设备和其他客户端() -> None:
+    """任一客户端写下的原字节进设备，并出现在其他客户端。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    first = hub.attach_client(2222)
+    second = hub.attach_client(2222)
+
+    first.write(b"ls\r")
+
+    assert serial.written(device) == b"ls\r"
+    assert second.received() == b"ls\r"
+    assert first.received() == b""
+
+
+def test_同时写不拒绝也不设写锁() -> None:
+    """两个客户端都能写下，串通不排队、不拒绝。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    first = hub.attach_client(2222)
+    second = hub.attach_client(2222)
+
+    first.write(b"A")
+    second.write(b"B")
+
+    assert serial.written(device) == b"AB"
+    assert first.received() == b"B"
+    assert second.received() == b"A"
+
+
+def test_客户端离开后不再收到后续字节且线路仍占口() -> None:
+    """离开的客户端停收；留下的继续共驾，占口不放。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    first = hub.attach_client(2222)
+    second = hub.attach_client(2222)
+
+    second.leave()
+    serial.emit(device, b"still-here")
+    first.write(b"x")
+
+    assert first.received() == b"still-here"
+    assert second.received() == b""
+    assert serial.written(device) == b"x"
+    assert serial.is_held(device)
+
+
+def test_离开的客户端再写不会进设备() -> None:
+    """离开等于不再参与三通，写下的也不进设备、不到其他客户端。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    first = hub.attach_client(2222)
+    second = hub.attach_client(2222)
+
+    second.leave()
+    second.write(b"ghost")
+
+    assert serial.written(device) == b""
+    assert first.received() == b""

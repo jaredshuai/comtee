@@ -3,6 +3,7 @@
 from comtee.hub import (
     ArrangementRejected,
     ArrangementStore,
+    Client,
     Comtee,
     LineArrangement,
     LineHold,
@@ -15,6 +16,7 @@ from comtee.hub import (
 __all__ = [
     "ArrangementRejected",
     "ArrangementStore",
+    "Client",
     "Comtee",
     "LineArrangement",
     "LineHold",
