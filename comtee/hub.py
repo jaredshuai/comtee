@@ -5,9 +5,15 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+_RECENT_LIMIT = 4096
+
 
 class ArrangementRejected(Exception):
     """两条线路不得共享同一人端入口或同一台设备。"""
+
+
+class AgentForbidden(Exception):
+    """Agent 不能编排线路，也不能改串口参数和解码。"""
 
 
 class LineHold(StrEnum):
@@ -108,7 +114,8 @@ class _Line:
     serial_params: SerialParams = field(default_factory=SerialParams)
     decode: str = "gbk"
     hold: LineHold = LineHold.WAITING
-    clients: list[Client] = field(default_factory=list)
+    clients: list[Client | Agent] = field(default_factory=list)
+    recent: bytearray = field(default_factory=bytearray)
 
 
 class Client:
@@ -137,6 +144,46 @@ class Client:
     def _deliver(self, data: bytes) -> None:
         """收下扇出到本客户端的原字节。"""
         self._inbox.extend(data)
+
+
+class Agent:
+    """挂在已有线路上的 Agent 端：读解码后的字，写原字节。"""
+
+    def __init__(self, hub: Comtee, human_entry: int) -> None:
+        """绑定到指名的那条线路，串通不猜设备。"""
+        self._hub = hub
+        self._human_entry = human_entry
+        self._inbox = bytearray()
+
+    def received(self) -> str:
+        """取出尚未取走的可读字，按该线路解码。"""
+        raw = bytes(self._inbox)
+        self._inbox.clear()
+        return raw.decode(self._hub._decode_of(self._human_entry), errors="replace")
+
+    def write(self, data: bytes) -> None:
+        """写下仍是原字节，进设备并出现在其他客户端。"""
+        self._hub._write_from_client(self, data)
+
+    def leave(self) -> None:
+        """离开线路，不再收到后续字节。"""
+        self._hub._detach_client(self)
+
+    def _deliver(self, data: bytes) -> None:
+        """收下扇出到本 Agent 的原字节，读时再解码。"""
+        self._inbox.extend(data)
+
+    def create_line(self, human_entry: int, device: UsbIdentity) -> None:
+        """拒绝：Agent 不能创建线路。"""
+        raise AgentForbidden("Agent 不能编排线路")
+
+    def change_line(self, **_kwargs: object) -> None:
+        """拒绝：Agent 不能改串口参数或解码。"""
+        raise AgentForbidden("Agent 不能改串口参数和解码")
+
+    def remove_line(self, human_entry: int) -> None:
+        """拒绝：Agent 不能拆线路。"""
+        raise AgentForbidden("Agent 不能编排线路")
 
 
 class Comtee:
@@ -176,6 +223,15 @@ class Comtee:
         client = Client(self, human_entry)
         self._lines[human_entry].clients.append(client)
         return client
+
+    def attach_agent(self, human_entry: int) -> Agent:
+        """把 Agent 挂上指名的已有线路，进场带最近缓冲。"""
+        line = self._lines[human_entry]
+        agent = Agent(self, human_entry)
+        if line.recent:
+            agent._deliver(bytes(line.recent))
+        line.clients.append(agent)
+        return agent
 
     def change_line(
         self,
@@ -250,27 +306,36 @@ class Comtee:
         line = self._lines.get(human_entry)
         if line is None:
             return
+        self._remember(line, data)
         for client in line.clients:
             client._deliver(data)
 
-    def _write_from_client(self, client: Client, data: bytes) -> None:
+    def _write_from_client(self, client: Client | Agent, data: bytes) -> None:
         """客户端写入：进设备，并出现在其他客户端。"""
         line = self._lines.get(client._human_entry)
         if line is None or client not in line.clients:
             return
         if line.hold == LineHold.HELD:
             self._serial.write(line.device, data)
+        self._remember(line, data)
         for other in line.clients:
             if other is not client:
                 other._deliver(data)
 
-    def _detach_client(self, client: Client) -> None:
+    def _detach_client(self, client: Client | Agent) -> None:
         """客户端离开后不再扇出给它；线路仍占口。"""
         line = self._lines.get(client._human_entry)
         if line is None:
             return
         if client in line.clients:
             line.clients.remove(client)
+
+    def _remember(self, line: _Line, data: bytes) -> None:
+        """记下一段最近原字节，超出上限丢掉更早的。"""
+        line.recent.extend(data)
+        extra = len(line.recent) - _RECENT_LIMIT
+        if extra > 0:
+            del line.recent[:extra]
 
     def _persist(self) -> None:
         """把当前编排写入存档。"""
@@ -295,3 +360,10 @@ class Comtee:
             decode=line.decode,
             hold=line.hold,
         )
+
+    def _decode_of(self, human_entry: int) -> str:
+        """该线路当前的解码；线路没了则回落到默认 GBK。"""
+        line = self._lines.get(human_entry)
+        if line is None:
+            return "gbk"
+        return line.decode

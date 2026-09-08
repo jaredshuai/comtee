@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from comtee import (
+    AgentForbidden,
     ArrangementRejected,
     Comtee,
     LineArrangement,
@@ -458,3 +459,123 @@ def test_另一台设备再现不会误接到这条线路() -> None:
     assert not serial.is_held(device)
     assert not serial.is_held(stranger)
     assert client.received() == b""
+
+
+def test_Agent按线路解码看见字而管子仍是原字节() -> None:
+    """Agent 读到 GBK 解码后的字；人端仍拿到原字节。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    human = hub.attach_client(2222)
+    agent = hub.attach_agent(2222)
+
+    payload = "你好".encode("gbk")
+    serial.emit(device, payload)
+
+    assert human.received() == payload
+    assert agent.received() == "你好"
+
+
+def test_人改解码后Agent按新规则看见字() -> None:
+    """解码只是 Agent 视图；人改完之后新字节按新规则读。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    agent = hub.attach_agent(2222)
+    hub.change_line(2222, decode="utf-8")
+
+    serial.emit(device, "你好".encode())
+
+    assert agent.received() == "你好"
+
+
+def test_Agent写入以原字节进设备() -> None:
+    """Agent 写下的不经过解码改写，原样进设备并出现在人端。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    human = hub.attach_client(2222)
+    agent = hub.attach_agent(2222)
+
+    raw = "显示".encode("gbk")
+    agent.write(raw)
+
+    assert serial.written(device) == raw
+    assert human.received() == raw
+
+
+def test_Agent进场带最近缓冲且不进线路状态() -> None:
+    """进场可读视图带最近内容；缓冲不是线路状态上的字段。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    serial.emit(device, "prompt> ".encode("gbk"))
+
+    agent = hub.attach_agent(2222)
+
+    assert agent.received() == "prompt> "
+    [line] = hub.list_lines()
+    assert not hasattr(line, "recent")
+    assert not hasattr(line, "buffer")
+
+
+def test_最近缓冲有上限且重启后不恢复() -> None:
+    """缓冲不是永久历史：只留一段尾巴，存档恢复后是空的。"""
+    store = MemoryStore()
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, store)
+    hub.create_line(2222, device)
+    serial.emit(device, (b"x" * 20000) + b"END")
+
+    text = hub.attach_agent(2222).received()
+    assert text.endswith("END")
+    assert len(text) < 20003
+
+    restarted = FakeSerial()
+    restarted.plug(device)
+    restored = Comtee(restarted, store)
+    assert restored.attach_agent(2222).received() == ""
+
+
+def test_Agent调用编排或改串口参数和解码被拒绝() -> None:
+    """编排权留在人手里。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    agent = hub.attach_agent(2222)
+    other = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT999")
+    serial.plug(other)
+
+    with pytest.raises(AgentForbidden):
+        agent.create_line(3333, other)
+    with pytest.raises(AgentForbidden):
+        agent.change_line(decode="utf-8")
+    with pytest.raises(AgentForbidden):
+        agent.remove_line(2222)
+
+    [line] = hub.list_lines()
+    assert line.decode == "gbk"
+    assert line.human_entry == 2222
+
+
+def test_Agent必须指名线路串通不猜设备() -> None:
+    """两条线路时，Agent 只能看到它指名的那一条。"""
+    serial = FakeSerial()
+    first = _plugged(serial, "FT123")
+    second = _plugged(serial, "FT456")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, first)
+    hub.create_line(3333, second)
+    serial.emit(first, b"AAA")
+    serial.emit(second, b"BBB")
+
+    agent = hub.attach_agent(2222)
+    assert agent.received() == "AAA"
+    with pytest.raises(KeyError):
+        hub.attach_agent(9999)
