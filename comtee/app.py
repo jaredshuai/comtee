@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from nicegui import app, native, ui
 
+from comtee.agent import AgentPipe
 from comtee.autostart import PreferredAutoStart, windows_autostart
 from comtee.hub import Comtee, UsbIdentity
 from comtee.native_window import install_hide_on_close
@@ -36,6 +37,7 @@ def run() -> None:
         FileArrangementStore(data_dir / "lines.json"),
         human=human,
     )
+    agent_pipe = AgentPipe(hub)
     command = f'"{sys.executable}" -m comtee'
     autostart = PreferredAutoStart(
         windows_autostart(command),
@@ -83,6 +85,8 @@ def run() -> None:
 
     build_panel(hub, list_paths, autostart)
     app.on_startup(start_tray)
+    app.on_startup(agent_pipe.start)
+    app.on_shutdown(agent_pipe.shutdown)
     app.on_shutdown(human.shutdown)
     app.on_shutdown(hub.shutdown)
     install_hide_on_close()

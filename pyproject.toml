@@ -11,6 +11,9 @@ dependencies = [
     "pywebview>=6.2.1",
 ]
 
+[project.scripts]
+comtee-mcp = "comtee.mcp:main"
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
