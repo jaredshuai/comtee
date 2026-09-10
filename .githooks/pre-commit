@@ -1,0 +1,78 @@
+#!/bin/sh
+# lazypack:start block=pre-commit-hook src=DECISIONS.md@0.2.0 gen=aeb0254139bb9c52 input=0f7c6894fcdea705 fp=8369c41ddd69556b
+# -----------------------------------------------------------------------------
+# lazypack-discipline 提交前质量门禁 (DECISIONS §6)
+# -----------------------------------------------------------------------------
+
+EXIT_CODE=0
+
+run_gate() {
+  GATE_NAME="$1"
+  GATE_STATUS="$2"
+  GATE_CMD="$3"
+
+  case "$GATE_STATUS" in
+    wired)
+      # Reject empty or whitespace-only command (POSIX sh compliant)
+      case "$GATE_CMD" in
+        *[![:space:]]*)
+          ;;
+        *)
+          echo "❌ [lazypack] $GATE_NAME: wired status but command is empty or whitespace only!" >&2
+          EXIT_CODE=1
+          return
+          ;;
+      esac
+      echo "[lazypack] Running $GATE_NAME: $GATE_CMD"
+      # Execute command in an isolated subshell to prevent exit 0 bypass or variable leakage
+      if ! ( eval "$GATE_CMD" ); then
+        echo "❌ [lazypack] $GATE_NAME check failed!" >&2
+        EXIT_CODE=1
+      else
+        echo "✅ [lazypack] $GATE_NAME check passed."
+      fi
+      ;;
+    missing)
+      echo "⚠️ [lazypack] $GATE_NAME: skipped (unwired / tool missing)"
+      ;;
+    n/a)
+      echo "ℹ️ [lazypack] $GATE_NAME: skipped (not applicable for project)"
+      ;;
+    install-failed)
+      echo "❌ [lazypack] $GATE_NAME: blocked (dependency installation failed)" >&2
+      EXIT_CODE=1
+      ;;
+    *)
+      echo "❌ [lazypack] $GATE_NAME: invalid status ($GATE_STATUS), failing closed." >&2
+      EXIT_CODE=1
+      ;;
+  esac
+}
+
+# Gate 1: Format
+FORMAT_STATUS='wired'
+FORMAT_CMD='uv run ruff format .'
+run_gate "format" "$FORMAT_STATUS" "$FORMAT_CMD"
+
+# Gate 2: Lint
+LINT_STATUS='wired'
+LINT_CMD='uv run ruff check .'
+run_gate "lint" "$LINT_STATUS" "$LINT_CMD"
+
+# Gate 3: Type
+TYPE_STATUS='wired'
+TYPE_CMD='uv run ty check'
+run_gate "type" "$TYPE_STATUS" "$TYPE_CMD"
+
+# Gate 4: Test
+TEST_STATUS='wired'
+TEST_CMD='uv run pytest'
+run_gate "test" "$TEST_STATUS" "$TEST_CMD"
+
+if [ $EXIT_CODE -ne 0 ]; then
+  echo "🚫 [lazypack] Pre-commit quality gates failed. Commit aborted." >&2
+  exit $EXIT_CODE
+fi
+
+exit 0
+# lazypack:end block=pre-commit-hook
