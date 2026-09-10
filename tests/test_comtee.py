@@ -81,6 +81,10 @@ class FakeSerial:
         """模拟设备已被别人占用、打不开。"""
         self._busy.add(device)
 
+    def clear_busy(self, device: UsbIdentity) -> None:
+        """模拟别人放口；设备仍在场。"""
+        self._busy.discard(device)
+
     def occupy(self, device: UsbIdentity, params: SerialParams) -> LineHold:
         """按身份占口；不在则等待，被占则冲突。"""
         if device not in self._present:
@@ -208,6 +212,23 @@ def test_设备打不开时是占用冲突不是等待设备() -> None:
     assert line.hold == LineHold.CONFLICT
     assert line.hold != LineHold.WAITING
     assert not serial.is_held(device)
+
+
+def test_占用冲突在对方放口后对照现场再占口() -> None:
+    """占用冲突不是终态：别人放口后刷新应占口。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    serial.mark_busy(device)
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    assert hub.list_lines()[0].hold == LineHold.CONFLICT
+
+    serial.clear_busy(device)
+    hub.refresh()
+
+    [line] = hub.list_lines()
+    assert line.hold == LineHold.HELD
+    assert serial.is_held(device)
 
 
 def test_能改一条线路的串口参数和解码() -> None:

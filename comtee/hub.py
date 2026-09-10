@@ -330,7 +330,7 @@ class Comtee:
         )
 
     def _reconcile(self) -> None:
-        """对照现场插着的设备：消失则等待，同一身份再现则再占口。"""
+        """对照现场：不在则等待；在场且未占口（等待或占用冲突）则再占口。"""
         present = self._serial.present()
         for line in self._lines.values():
             if line.device not in present:
@@ -339,8 +339,6 @@ class Comtee:
                 line.hold = LineHold.WAITING
                 continue
             if line.hold == LineHold.HELD:
-                continue
-            if line.hold != LineHold.WAITING:
                 continue
             line.hold = self._serial.occupy(line.device, line.serial_params)
             self._bind_device(line)
