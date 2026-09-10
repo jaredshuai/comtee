@@ -83,7 +83,10 @@ def run() -> None:
         tray_holder["icon"] = icon
         threading.Thread(target=icon.run, daemon=True).start()
 
-    build_panel(hub, list_paths, autostart)
+    def open_panel() -> None:
+        """画出面板根页。交给 NiceGUI 当 root，避免脚本模式把首页当 404 再跑一遍入口。"""
+        build_panel(hub, list_paths, autostart)
+
     app.on_startup(start_tray)
     app.on_startup(agent_pipe.start)
     app.on_shutdown(agent_pipe.shutdown)
@@ -91,6 +94,7 @@ def run() -> None:
     app.on_shutdown(hub.shutdown)
     install_hide_on_close()
     ui.run(
+        root=open_panel,
         native=True,
         reload=False,
         title=_TITLE,
