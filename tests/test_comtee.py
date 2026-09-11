@@ -726,6 +726,35 @@ def test_恢复编排时入口被占线路仍在且标为未监听() -> None:
     assert human.listening == set()
 
 
+def test_恢复时入口被占对方放口后对照现场再听() -> None:
+    """人端入口占用也不是终态：别人放口后刷新应再听。"""
+    store = MemoryStore()
+    device = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    store.save(
+        (
+            LineArrangement(
+                human_entry=2222,
+                device=device,
+                serial_params=SerialParams(),
+                decode="gbk",
+            ),
+        )
+    )
+    serial = FakeSerial()
+    serial.plug(device)
+    human = FakeHuman()
+    human.blocked.add(2222)
+    hub = Comtee(serial, store, human=human)
+    assert hub.list_lines()[0].human_listening is False
+
+    human.blocked.discard(2222)
+    hub.refresh()
+
+    [line] = hub.list_lines()
+    assert line.human_listening is True
+    assert 2222 in human.listening
+
+
 def test_改入口失败时原线路配置和连接都保留() -> None:
     """新入口绑不上时，不得先拆旧入口再失败。"""
     serial = FakeSerial()

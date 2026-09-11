@@ -145,6 +145,22 @@ class _DyingHandle:
         self.closed = True
 
 
+class _FailOnceThenFeedHandle(_FeedHandle):
+    """第一次读取失败，之后仍可投喂设备输出。"""
+
+    def __init__(self, path: str) -> None:
+        """先记下打开路径，并记住还没失败过。"""
+        super().__init__(path)
+        self._failed = False
+
+    def read(self, size: int = 4096) -> bytes:
+        """第一次抛错，随后按队列取出设备字节。"""
+        if not self._failed:
+            self._failed = True
+            raise OSError("device hiccup")
+        return super().read(size)
+
+
 class _MemoryStore:
     """本文件用的进程内编排存档。"""
 
@@ -321,4 +337,23 @@ def test_读取失败会通知对照现场() -> None:
     adapter.listen(device, lambda _data: None)
     adapter.occupy(device, SerialParams())
     assert notified.wait(1.5)
+    adapter.release(device)
+
+
+def test_读取失败后对照现场能再收到设备输出() -> None:
+    """读线程通知对照现场时自己还活着，不得挡住下一根读线程。"""
+    device = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    handle = _FailOnceThenFeedHandle("COM6")
+    got: list[bytes] = []
+    adapter = UsbSerial(lambda: [_ftdi_snapshot()], lambda path, _p: handle)
+
+    def on_change() -> None:
+        """对照现场时重新登记回调，模拟 Hub 在 HELD 上再 bind。"""
+        adapter.listen(device, got.append)
+
+    adapter.watch(on_change)
+    adapter.listen(device, got.append)
+    adapter.occupy(device, SerialParams())
+    handle.feed(b"after-hiccup")
+    _wait_until(lambda: got == [b"after-hiccup"])
     adapter.release(device)

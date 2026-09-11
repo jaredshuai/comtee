@@ -135,7 +135,7 @@ def test_创建线路时入口被占则不留下半条线路() -> None:
 
 
 def test_恢复编排时入口被占线路仍在且未监听() -> None:
-    """启动恢复时入口冲突只影响人端监听，不拆线路、不放设备。"""
+    """启动恢复时入口冲突只影响人端监听；对方放口后刷新再听。"""
     store = MemoryStore()
     serial = FakeSerial()
     device = _plugged(serial, "FT123")
@@ -159,8 +159,15 @@ def test_恢复编排时入口被占线路仍在且未监听() -> None:
         assert line.hold == LineHold.HELD
         with pytest.raises(KeyError):
             restored_human.listen_address(port)
-    finally:
         blocker.close()
+        blocker = None
+        restored.refresh()
+        [after] = restored.list_lines()
+        assert after.human_listening is True
+        restored_human.listen_address(port)
+    finally:
+        if blocker is not None:
+            blocker.close()
         restored_human.shutdown()
 
 

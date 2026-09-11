@@ -440,20 +440,27 @@ class Comtee:
         self._lines[new_entry] = line
         self._bind_device(line)
 
+    def _retry_human_entry(self, line: _Line) -> None:
+        """入口未听时再绑一次；对方已放口则恢复监听。"""
+        if line.human_listening or self._human is None:
+            return
+        if self._human.occupy(line.human_entry):
+            line.human_listening = True
+
     def _reconcile(self) -> None:
-        """对照现场：不在则等待；在场且未占口（等待或占用冲突）则再占口。"""
+        """对照现场：设备再占口；人端入口未听则再绑。"""
         present = self._serial.present()
         for line in self._lines.values():
             if line.device not in present:
                 if line.hold == LineHold.HELD:
                     self._serial.release(line.device)
                 line.hold = LineHold.WAITING
-                continue
-            if line.hold == LineHold.HELD:
+            elif line.hold == LineHold.HELD:
                 self._bind_device(line)
-                continue
-            line.hold = self._serial.occupy(line.device, line.serial_params)
-            self._bind_device(line)
+            else:
+                line.hold = self._serial.occupy(line.device, line.serial_params)
+                self._bind_device(line)
+            self._retry_human_entry(line)
 
     def _on_device_bytes(self, human_entry: int, data: bytes) -> None:
         """设备字节以原样送到每个已挂客户端。"""

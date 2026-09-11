@@ -122,11 +122,15 @@ class UsbSerial:
         self._ensure_reader(device)
 
     def _ensure_reader(self, device: UsbIdentity) -> None:
-        """占口且有回调时启动读线程；线程已死则再拉起来。"""
+        """占口且有回调时启动读线程；已死或正是当前这根则再拉起来。"""
         if device not in self._held or device not in self._listeners:
             return
         existing = self._readers.get(device)
-        if existing is not None and existing.is_alive():
+        if (
+            existing is not None
+            and existing.is_alive()
+            and existing is not threading.current_thread()
+        ):
             return
         stop = threading.Event()
         self._stops[device] = stop
@@ -138,6 +142,11 @@ class UsbSerial:
         self._readers[device] = thread
         thread.start()
 
+    def _forget_reader(self, device: UsbIdentity, thread: threading.Thread) -> None:
+        """读线程退出前先把自己从登记拿掉，好让对照现场再拉一根。"""
+        if self._readers.get(device) is thread:
+            del self._readers[device]
+
     def _read_loop(self, device: UsbIdentity, stop: threading.Event) -> None:
         """循环读取真串口，把设备字节送到登记的回调。"""
         while not stop.is_set():
@@ -148,6 +157,7 @@ class UsbSerial:
             try:
                 data = handle.read(4096)
             except OSError:
+                self._forget_reader(device, threading.current_thread())
                 on_change = self._on_change
                 if on_change is not None:
                     on_change()
