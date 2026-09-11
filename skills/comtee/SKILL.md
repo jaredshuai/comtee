@@ -14,4 +14,4 @@
 
 由人当场告知 **人端入口**（本机 Telnet 端口号）。串通不替你猜设备。
 
-可用工具：`list_lines`、`read_line`、`write_line`。不能创建、改、拆线路，也不能改串口参数和解码。
+可用工具：`list_lines`、`read_line`、`write_line`。不能创建、改、拆线路，也不能改串口参数和 Agent 字符集（解码）。设备未占口时 `write_line` 会失败，不会在重连后补发。

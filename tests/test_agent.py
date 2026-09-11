@@ -4,7 +4,7 @@ from pathlib import Path
 
 from comtee import Comtee, LineHold, UsbIdentity
 from comtee.agent import AgentBridge
-from tests.test_comtee import FakeSerial, MemoryStore
+from tests.test_comtee import FakeHuman, FakeSerial, MemoryStore
 
 
 def test_读写必须指名线路() -> None:
@@ -134,3 +134,43 @@ def test_命名管道指名读写且关掉不放口() -> None:
             except OSError:
                 pass
         server.shutdown()
+
+
+def test_设备未占口时写入明确失败() -> None:
+    """等待设备时 Agent 端不得回报成功，也不得把字塞进最近缓冲。"""
+    serial, device, hub = _ready()
+    bridge = AgentBridge(hub)
+    serial.unplug(device)
+
+    written = bridge.handle({"op": "write", "human_entry": 2222, "text": "ab"})
+    read = bridge.handle({"op": "read", "human_entry": 2222})
+
+    assert written["ok"] is False
+    assert (
+        "发送" in written["error"]
+        or "占口" in written["error"]
+        or "设备" in written["error"]
+    )
+    assert serial.ingress(device) == b""
+    assert read["ok"] is True
+    assert read["text"] == ""
+
+
+def test_改入口后Agent必须指名新端口() -> None:
+    """入口迁移后，旧端口缓存不得继续写到这条线路。"""
+    serial = FakeSerial()
+    device = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    serial.plug(device)
+    human = FakeHuman()
+    hub = Comtee(serial, MemoryStore(), human=human)
+    hub.create_line(2222, device)
+    bridge = AgentBridge(hub)
+    first = bridge.handle({"op": "write", "human_entry": 2222, "text": "a"})
+    hub.change_line(2222, new_entry=3333)
+    stale = bridge.handle({"op": "write", "human_entry": 2222, "text": "b"})
+    moved = bridge.handle({"op": "write", "human_entry": 3333, "text": "c"})
+
+    assert first["ok"] is True
+    assert stale["ok"] is False
+    assert moved["ok"] is True
+    assert serial.written(device) == b"ac"

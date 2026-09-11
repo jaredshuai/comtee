@@ -4,6 +4,7 @@
 用其他程序占住该 COM 后再 occupy，应为占用冲突；蓝牙虚拟口不得出现在列表里。
 """
 
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol
@@ -57,7 +58,11 @@ class PortBusy(Exception):
 
 
 class OpenedPort(Protocol):
-    """一次占口拿到的可写、可关的串口。"""
+    """一次占口拿到的可读、可写、可关的串口。"""
+
+    def read(self, size: int = 4096) -> bytes:
+        """取出设备打出的原字节；没有则空。"""
+        ...
 
     def write(self, data: bytes) -> None:
         """把原字节打进设备。"""
@@ -81,6 +86,8 @@ class UsbSerial:
         self._open_port = open_port
         self._held: dict[UsbIdentity, OpenedPort] = {}
         self._listeners: dict[UsbIdentity, Callable[[bytes], None]] = {}
+        self._readers: dict[UsbIdentity, threading.Thread] = {}
+        self._stops: dict[UsbIdentity, threading.Event] = {}
         self._on_change: Callable[[], None] | None = None
 
     def occupy(self, device: UsbIdentity, params: SerialParams) -> LineHold:
@@ -93,18 +100,62 @@ class UsbSerial:
         except PortBusy:
             return LineHold.CONFLICT
         self._held[device] = handle
+        self._ensure_reader(device)
         return LineHold.HELD
 
     def release(self, device: UsbIdentity) -> None:
-        """放掉该设备。"""
+        """放掉该设备并停掉读线程。"""
+        stop = self._stops.pop(device, None)
+        if stop is not None:
+            stop.set()
+        thread = self._readers.pop(device, None)
         handle = self._held.pop(device, None)
         self._listeners.pop(device, None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
         if handle is not None:
             handle.close()
 
     def listen(self, device: UsbIdentity, on_bytes: Callable[[bytes], None]) -> None:
-        """登记设备字节回调。"""
+        """登记设备字节回调，并在已占口时开始泵字节。"""
         self._listeners[device] = on_bytes
+        self._ensure_reader(device)
+
+    def _ensure_reader(self, device: UsbIdentity) -> None:
+        """占口且有回调时启动读线程；线程已死则再拉起来。"""
+        if device not in self._held or device not in self._listeners:
+            return
+        existing = self._readers.get(device)
+        if existing is not None and existing.is_alive():
+            return
+        stop = threading.Event()
+        self._stops[device] = stop
+        thread = threading.Thread(
+            target=self._read_loop,
+            args=(device, stop),
+            daemon=True,
+        )
+        self._readers[device] = thread
+        thread.start()
+
+    def _read_loop(self, device: UsbIdentity, stop: threading.Event) -> None:
+        """循环读取真串口，把设备字节送到登记的回调。"""
+        while not stop.is_set():
+            handle = self._held.get(device)
+            listener = self._listeners.get(device)
+            if handle is None or listener is None:
+                return
+            try:
+                data = handle.read(4096)
+            except OSError:
+                on_change = self._on_change
+                if on_change is not None:
+                    on_change()
+                return
+            if data:
+                listener(data)
+            elif stop.wait(0.05):
+                return
 
     def write(self, device: UsbIdentity, data: bytes) -> None:
         """把客户端写下的原字节打进已占的口。"""

@@ -34,3 +34,38 @@
 - **打包构筑**：Windows 桌面面板（NiceGUI native）；安装包方案未选定 [未验证]。
 - **发布/上传**：Git 打 `vX.Y.Z` 标签；安装包分发流程 [未验证]。
 <!-- lazypack:end block=release-discipline -->
+
+## 本仓库打包（Nuitka + Inno Setup）
+
+选定方案：Nuitka **standalone 目录** + Inno Setup 安装包。不用 onefile：串通是托盘常驻，每次自解压会拖慢登录自启。
+
+前置：
+
+- `uv sync --group packaging --group dev`
+- Inno Setup 6 或 7（`ISCC.exe`）。未安装时 Nuitka 阶段仍可打出目录，安装包阶段会失败并提示下载地址。
+- Windows 11（自带 WebView2）。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File installer/build.ps1
+powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Stage nuitka
+powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Stage inno
+powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Stage nuitka -Force
+powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Stage inno -Force
+powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Force
+powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Clean
+```
+
+阶段标记在 `installer/.build-state/*.ok`。标记在、产物还在、版本没变，就跳过该阶段。失败不会清掉已经成功的阶段。已有 `main.dist` / 安装包但还没有标记时，脚本会补写 `.ok`，不会重打。
+
+改代码后要重打 Nuitka：`-Stage nuitka -Force`（会清掉 `inno.ok`，接着跑 `-Stage inno` 或默认 `all` 才会重打安装包）。只重打安装包：`-Stage inno -Force`。`-Force` 会带 `--remove-output` 清掉旧的 standalone 目录再编；中断后续打不要加 `-Force`，让 Nuitka 复用已生成的 obj。`-Clean` 会删掉 `installer/dist` 和阶段标记。
+
+产物：
+
+- `installer/dist/comtee.dist/comtee.exe`（或 `main.dist`）
+- `installer/dist/Comtee-Setup-<version>.exe`
+
+安装到 `%LOCALAPPDATA%\Programs\串通`，不需要管理员。线路存档仍在 `%LOCALAPPDATA%\comtee`，卸安装包不会拆线路。登录自启由程序自己写 HKCU Run；安装包不重复写启动项。
+
+Agent 端 MCP 不打进安装包，仍用源码 `python -m comtee.mcp` 去连已启动的串通。
+
+首次 Nuitka 编译约 34 分钟；Inno 随后打出安装包。tag、CI、GitHub Release 不在本分支，留给后续发版工作。

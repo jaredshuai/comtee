@@ -78,6 +78,7 @@ def _to_dict(line: LineArrangement) -> dict:
         "stop_bits": line.serial_params.stop_bits,
         "flow_control": line.serial_params.flow_control,
         "decode": line.decode,
+        "name": line.name,
     }
 
 
@@ -98,4 +99,5 @@ def _from_dict(item: dict) -> LineArrangement:
             flow_control=str(item["flow_control"]),
         ),
         decode=str(item["decode"]),
+        name=str(item.get("name", "")),
     )
