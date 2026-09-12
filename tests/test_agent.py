@@ -156,6 +156,26 @@ def test_设备未占口时写入明确失败() -> None:
     assert read["text"] == ""
 
 
+def test_Agent未占口写入失败恢复后不补发() -> None:
+    """Agent 写入失败不得显示成功；设备回来后不得补发旧字。"""
+    serial, device, hub = _ready()
+    bridge = AgentBridge(hub)
+    serial.unplug(device)
+    failed = bridge.handle({"op": "write", "human_entry": 2222, "text": "stale"})
+    serial.plug(device, path="COM8")
+    hub.retry_line(2222)
+    listed = bridge.handle({"op": "list"})
+
+    assert failed["ok"] is False
+    assert listed["lines"][0]["hold"] == LineHold.HELD
+    assert listed["lines"][0]["writable"] is True
+    assert serial.written(device) == b""
+    assert serial.ingress(device) == b""
+    later = bridge.handle({"op": "write", "human_entry": 2222, "text": "fresh"})
+    assert later["ok"] is True
+    assert serial.written(device) == b"fresh"
+
+
 def test_改入口后Agent必须指名新端口() -> None:
     """入口迁移后，旧端口缓存不得继续写到这条线路。"""
     serial = FakeSerial()

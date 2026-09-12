@@ -6,7 +6,7 @@ import json
 import threading
 from typing import Any
 
-from comtee.hub import Agent, AgentForbidden, Comtee, LineStatus
+from comtee.hub import Agent, AgentForbidden, Comtee, LineHold, LineStatus
 
 PIPE_NAME = r"\\.\pipe\comtee"
 
@@ -91,8 +91,19 @@ class AgentBridge:
         except AgentForbidden as exc:
             return {"ok": False, "error": str(exc)}
         if not sent:
-            return {"ok": False, "error": "设备未占口，写入未发送"}
+            return {"ok": False, "error": self._write_rejected(human_entry)}
         return {"ok": True}
+
+    def _write_rejected(self, human_entry: int) -> str:
+        """未占口写入必须明确失败，不得让调用方当成已发送。"""
+        for line in self._hub.list_lines():
+            if line.human_entry == human_entry:
+                if line.hold == LineHold.WAITING:
+                    return "等待设备，写入未发送"
+                if line.hold == LineHold.CONFLICT:
+                    return "占用冲突，写入未发送"
+                break
+        return "设备未占口，写入未发送"
 
     def _decode_of(self, human_entry: int) -> str:
         """指名线路当前的解码。"""
@@ -115,6 +126,7 @@ def _line_view(line: LineStatus) -> dict:
         "agent_connected": line.agent_connected,
         "name": line.name,
         "human_listening": line.human_listening,
+        "writable": line.hold == LineHold.HELD,
     }
 
 

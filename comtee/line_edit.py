@@ -86,6 +86,46 @@ class SplitStatus:
     device_class: str
 
 
+@dataclass(frozen=True)
+class LineHealth:
+    """列表和详情共用的分项状态：设备、人端、客户端和可否读写。"""
+
+    writable: bool
+    rw_label: str
+    badge: str
+    badge_class: str
+    device: str
+    device_class: str
+    human: str
+    human_class: str
+    clients: str
+    reason: str
+    next_action: str
+    retry_hold: bool
+    retry_listen: bool
+
+
+@dataclass(frozen=True)
+class StatusNotice:
+    """一个失败状态的原因、下一步和可选恢复动作。"""
+
+    kind: str
+    title: str
+    reason: str
+    next_action: str
+    action: str
+    action_label: str
+    severity: str
+
+
+@dataclass(frozen=True)
+class RecoveryNotice:
+    """状态好转时给面板的一句反馈。"""
+
+    title: str
+    message: str
+
+
 def serial_format(params: SerialParams) -> str:
     """由实际配置生成 8N1 这类串口格式，不写死。"""
     return f"{params.data_bits}{params.parity}{int(params.stop_bits)}"
@@ -197,12 +237,12 @@ def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impac
     )
 
 
-def split_status(view: LineView) -> SplitStatus:
-    """人端监听和设备占口分开呈现；总徽章取更严重的那头。"""
+def line_health(view: LineView) -> LineHealth:
+    """设备、人端监听、客户端分开呈现；失败时给出原因和下一步。"""
     if not view.human_listening:
         human = "人端：未监听"
         human_class = "error-color"
-        badge = "入口端口被占用"
+        badge = "端口冲突"
         badge_class = "error-color"
     else:
         human = "人端：正在监听"
@@ -219,12 +259,136 @@ def split_status(view: LineView) -> SplitStatus:
         device = "设备：占用冲突"
         device_class = "error-color"
         if view.human_listening:
-            badge = "设备占用冲突"
+            badge = "占用冲突"
             badge_class = "error-color"
     else:
         device = "设备：已占口"
         device_class = ""
-    return SplitStatus(badge, badge_class, human, device, human_class, device_class)
+    writable = view.hold == LineHold.HELD
+    if writable and view.human_listening:
+        rw_label = "可读写"
+    elif writable:
+        rw_label = "设备可写 · 人端未监听"
+    else:
+        rw_label = "不可写"
+    agent = "Agent 已连接" if view.agent_connected else "Agent 未连接"
+    clients = f"人端 {view.human_clients} · {agent}"
+    reason = ""
+    next_action = ""
+    if not view.human_listening:
+        reason = "人端入口绑不上：本机端口已被占用。"
+        next_action = (
+            "请关闭占用这个端口的程序，然后点「重试监听」；或在线路设置里换一个入口。"
+        )
+    elif view.hold == LineHold.WAITING:
+        reason = "线路还在，但这台设备此刻不在现场。"
+        next_action = (
+            "插回同一 USB 转接器。人端不用断开，写入现在不会发送，恢复后也不会补发。"
+        )
+    elif view.hold == LineHold.CONFLICT:
+        reason = "设备在场，但被其他程序占用，串通占不到口。"
+        next_action = "请关闭直接打开这个串口的软件，然后点「重试占口」。"
+    return LineHealth(
+        writable=writable,
+        rw_label=rw_label,
+        badge=badge,
+        badge_class=badge_class,
+        device=device,
+        device_class=device_class,
+        human=human,
+        human_class=human_class,
+        clients=clients,
+        reason=reason,
+        next_action=next_action,
+        retry_hold=view.hold == LineHold.CONFLICT,
+        retry_listen=not view.human_listening,
+    )
+
+
+def split_status(view: LineView) -> SplitStatus:
+    """人端监听和设备占口分开呈现；总徽章取更严重的那头。"""
+    health = line_health(view)
+    return SplitStatus(
+        health.badge,
+        health.badge_class,
+        health.human,
+        health.device,
+        health.human_class,
+        health.device_class,
+    )
+
+
+def failure_notices(view: LineView) -> tuple[StatusNotice, ...]:
+    """当前失败状态的原因、下一步和恢复动作。"""
+    notices: list[StatusNotice] = []
+    if not view.human_listening:
+        notices.append(
+            StatusNotice(
+                kind="port",
+                title=f"人端入口 {view.human_entry} 端口冲突",
+                reason="人端入口绑不上：本机端口已被占用。",
+                next_action=(
+                    "请关闭占用这个端口的程序，然后点「重试监听」；"
+                    "或在线路设置里换一个入口。"
+                ),
+                action="retry_listen",
+                action_label="重试监听",
+                severity="error",
+            )
+        )
+    if view.hold == LineHold.WAITING:
+        notices.append(
+            StatusNotice(
+                kind="waiting",
+                title="等待设备重新接入",
+                reason="线路还在，但这台设备此刻不在现场。",
+                next_action=(
+                    "插回同一 USB 转接器。人端不用断开，"
+                    "写入现在不会发送，恢复后也不会补发。"
+                ),
+                action="",
+                action_label="",
+                severity="waiting",
+            )
+        )
+    if view.hold == LineHold.CONFLICT:
+        path = view.device_path or "该串口"
+        notices.append(
+            StatusNotice(
+                kind="conflict",
+                title=f"{path} 正被其他程序占用",
+                reason="设备在场，但被其他程序占用，串通占不到口。",
+                next_action="请关闭直接打开这个串口的软件，然后点「重试占口」。",
+                action="retry_hold",
+                action_label="重试占口",
+                severity="error",
+            )
+        )
+    return tuple(notices)
+
+
+def recovery_notice(previous: LineView, current: LineView) -> RecoveryNotice | None:
+    """设备插回、占用解除或入口恢复监听时给一句反馈。"""
+    recovered_hold = previous.hold != LineHold.HELD and current.hold == LineHold.HELD
+    recovered_listen = (not previous.human_listening) and current.human_listening
+    if recovered_hold and previous.hold == LineHold.WAITING:
+        title = "设备已插回并占口"
+        message = "同一 USB 身份已对上。现在可以继续读写；断线期间的写入没有补发。"
+    elif recovered_hold and previous.hold == LineHold.CONFLICT:
+        title = "占用冲突已解除"
+        message = (
+            "对方已放口，线路已重新占口。现在可以继续读写；冲突期间的写入没有补发。"
+        )
+    elif recovered_listen:
+        title = "人端入口已恢复监听"
+        message = f"Telnet 可以再次接入 {listen_address(current.human_entry)}。"
+    else:
+        return None
+    if recovered_hold and recovered_listen and previous.hold != LineHold.WAITING:
+        message = f"{message} 人端入口也已恢复监听。"
+    elif recovered_hold and recovered_listen:
+        message = f"{message} 人端入口同时恢复监听。"
+    return RecoveryNotice(title, message)
 
 
 def agent_share_text(view: LineView) -> str:

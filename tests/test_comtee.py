@@ -476,6 +476,47 @@ def test_等待设备期间写入不进设备且不踢客户端() -> None:
     assert late.received() == ""
 
 
+def test_未占口写入失败恢复后不补发() -> None:
+    """等待期间的写入必须失败；插回后不得偷偷补发旧命令。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    client = hub.attach_client(2222)
+    serial.unplug(device)
+
+    assert client.write(b"stale") is False
+    serial.plug(device, path="COM11")
+    hub.retry_line(2222)
+
+    [line] = hub.list_lines()
+    assert line.hold == LineHold.HELD
+    assert serial.written(device) == b""
+    assert serial.ingress(device) == b""
+    assert client.write(b"fresh") is True
+    assert serial.written(device) == b"fresh"
+
+
+def test_占用冲突时写入失败对方放口后不补发() -> None:
+    """占用冲突时写入失败；对方放口后重试占口，旧写入仍不补发。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    serial.mark_busy(device)
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    client = hub.attach_client(2222)
+
+    assert hub.list_lines()[0].hold == LineHold.CONFLICT
+    assert client.write(b"blocked") is False
+    serial.clear_busy(device)
+    after = hub.retry_line(2222)
+
+    assert after.hold == LineHold.HELD
+    assert serial.is_held(device)
+    assert serial.written(device) == b""
+    assert serial.ingress(device) == b""
+
+
 def test_同一USB身份插回后即使路径变了也再占口() -> None:
     """插回同一身份则再占口，设备字节重新流动。"""
     serial = FakeSerial()
@@ -724,6 +765,43 @@ def test_恢复编排时入口被占线路仍在且标为未监听() -> None:
     assert line.human_listening is False
     assert serial.is_held(device)
     assert human.listening == set()
+
+
+def test_端口冲突可重试监听且不改编排() -> None:
+    """端口冲突必须有显式重试；对方未放口时仍失败，放口后恢复监听。"""
+    store = MemoryStore()
+    device = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    store.save(
+        (
+            LineArrangement(
+                human_entry=2222,
+                device=device,
+                serial_params=SerialParams(),
+                decode="gbk",
+                name="AC 控制台",
+            ),
+        )
+    )
+    serial = FakeSerial()
+    serial.plug(device)
+    human = FakeHuman()
+    human.blocked.add(2222)
+    hub = Comtee(serial, store, human=human)
+    client = hub.attach_client(2222)
+    assert client.write(b"keep") is True
+    assert hub.retry_line(2222).human_listening is False
+    assert hub.list_lines()[0].human_entry == 2222
+    assert hub.list_lines()[0].name == "AC 控制台"
+    assert store.load()[0].human_entry == 2222
+
+    human.blocked.discard(2222)
+    recovered = hub.retry_line(2222)
+
+    assert recovered.human_listening is True
+    assert recovered.hold == LineHold.HELD
+    assert 2222 in human.listening
+    assert store.load()[0].human_entry == 2222
+    assert serial.written(device) == b"keep"
 
 
 def test_恢复时入口被占对方放口后对照现场再听() -> None:

@@ -10,7 +10,10 @@ from comtee.line_edit import (
     Draft,
     LineView,
     agent_share_text,
+    failure_notices,
     impact_text,
+    line_health,
+    recovery_notice,
     serial_format,
     split_status,
     validate_draft,
@@ -66,8 +69,77 @@ def test_人端监听和设备占口分开呈现() -> None:
     assert "已占口" in held.device
     assert waiting.badge == "等待设备"
     assert "未接入" in waiting.device
-    assert entry.badge == "入口端口被占用"
+    assert entry.badge == "端口冲突"
     assert "未监听" in entry.human
+
+
+def test_四种线路状态徽章可区分() -> None:
+    """列表徽章必须分清占口、等待设备、占用冲突和端口冲突。"""
+    assert line_health(_view()).badge == "占口"
+    assert line_health(_view(hold=LineHold.WAITING)).badge == "等待设备"
+    assert line_health(_view(hold=LineHold.CONFLICT)).badge == "占用冲突"
+    assert line_health(_view(human_listening=False)).badge == "端口冲突"
+
+
+def test_列表能分开看到设备人端和客户端() -> None:
+    """线路列表要同时看见设备、人端监听和 Telnet/Agent 计数。"""
+    health = line_health(_view(human_clients=2, agent_connected=True))
+    assert "已占口" in health.device
+    assert "监听" in health.human
+    assert "人端 2" in health.clients
+    assert "Agent" in health.clients
+    assert health.writable is True
+    assert "可读写" in health.rw_label
+
+
+def test_失败状态带原因和下一步() -> None:
+    """每个异常状态都要有一句原因和一句下一步，可恢复的带重试动作。"""
+    waiting = failure_notices(_view(hold=LineHold.WAITING))
+    conflict = failure_notices(_view(hold=LineHold.CONFLICT))
+    port = failure_notices(_view(human_listening=False))
+    assert waiting[0].kind == "waiting"
+    assert waiting[0].reason
+    assert waiting[0].next_action
+    assert waiting[0].action == ""
+    assert conflict[0].kind == "conflict"
+    assert "占用" in conflict[0].reason
+    assert conflict[0].action == "retry_hold"
+    assert conflict[0].action_label == "重试占口"
+    assert port[0].kind == "port"
+    assert "端口" in port[0].reason or "入口" in port[0].reason
+    assert port[0].action == "retry_listen"
+    assert port[0].action_label == "重试监听"
+
+
+def test_未占口时线路不可写() -> None:
+    """等待设备或占用冲突时，面板必须标成不可写。"""
+    waiting = line_health(_view(hold=LineHold.WAITING))
+    conflict = line_health(_view(hold=LineHold.CONFLICT))
+    assert waiting.writable is False
+    assert "不可写" in waiting.rw_label
+    assert conflict.writable is False
+    assert "不可写" in conflict.rw_label
+
+
+def test_状态好转时给出恢复反馈() -> None:
+    """拔插、占用解除、入口恢复监听都不能只靠状态自己消失。"""
+    plugged = recovery_notice(
+        _view(hold=LineHold.WAITING),
+        _view(hold=LineHold.HELD),
+    )
+    freed = recovery_notice(
+        _view(hold=LineHold.CONFLICT),
+        _view(hold=LineHold.HELD),
+    )
+    listening = recovery_notice(
+        _view(human_listening=False),
+        _view(human_listening=True),
+    )
+    same = recovery_notice(_view(), _view())
+    assert plugged is not None and "占口" in plugged.title
+    assert freed is not None and "占用" in freed.title
+    assert listening is not None and "监听" in listening.title
+    assert same is None
 
 
 def test_Agent说明指名入口并禁止直接开COM() -> None:
@@ -99,6 +171,8 @@ def _view(
     hold: LineHold = LineHold.HELD,
     human_listening: bool = True,
     name: str = "AC 控制台",
+    human_clients: int = 2,
+    agent_connected: bool = True,
 ) -> LineView:
     """当前线路的只读视图，给影响说明和状态文案用。"""
     return LineView(
@@ -106,8 +180,8 @@ def _view(
         name=name,
         hold=hold,
         human_listening=human_listening,
-        human_clients=2,
-        agent_connected=True,
+        human_clients=human_clients,
+        agent_connected=agent_connected,
         serial_params=SerialParams(),
         decode="gbk",
         device_key="0403:6001|FT123",
