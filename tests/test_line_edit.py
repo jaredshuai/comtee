@@ -1,18 +1,28 @@
 """线路设置的可测层：校验、串口格式和保存影响说明。"""
 
-from comtee.hub import LineHold, SerialParams
+from comtee.hub import LineHold, SerialParams, UsbIdentity
 from comtee.line_edit import (
+    AGENT_PIPE,
     ALLOWED_CHARSETS,
     ALLOWED_DATA_BITS,
     ALLOWED_FLOW,
     ALLOWED_PARITY,
     ALLOWED_STOP_BITS,
+    MCP_COMMAND,
     Draft,
     LineView,
     agent_share_text,
+    create_device_choices,
+    create_port_conflict_error,
+    created_connection,
+    default_create_draft,
+    device_option_label,
+    draft_serial_params,
     failure_notices,
+    identity_key,
     impact_text,
     line_health,
+    listen_address,
     recovery_notice,
     serial_format,
     split_status,
@@ -149,6 +159,99 @@ def test_Agent说明指名入口并禁止直接开COM() -> None:
     assert "AC 控制台" in text
     assert "list_lines" in text
     assert "不要直接打开 COM" in text
+    assert MCP_COMMAND in text
+    assert AGENT_PIPE in text
+
+
+def test_设备选项同时包含COM路径和USB身份() -> None:
+    """新建下拉要同时看见此刻路径和稳定身份，不能只写 COM。"""
+    identity = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    label = device_option_label("COM6", identity)
+    choices = create_device_choices({identity: "COM6"}, set())
+    assert "COM6" in label
+    assert "0403:6001" in label
+    assert "FT123" in label
+    assert choices.options[identity_key(identity)] == label
+    assert choices.default == identity_key(identity)
+    assert choices.hint is None
+
+
+def test_已分配设备不出现在新建选项() -> None:
+    """同一台设备只能给一条线路，已占用的要从新建列表拿掉。"""
+    taken = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    free = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT456")
+    choices = create_device_choices(
+        {taken: "COM6", free: "COM7"},
+        {taken},
+    )
+    assert identity_key(taken) not in choices.options
+    assert "COM7" in choices.options[identity_key(free)]
+    assert "FT456" in choices.options[identity_key(free)]
+    assert choices.hint is None
+
+
+def test_没有设备时新建给出可行动提示() -> None:
+    """打开创建流程时，现场没有设备就要说清下一步，不能只给空下拉。"""
+    empty = create_device_choices({}, set())
+    taken = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    assigned_only = create_device_choices({taken: "COM6"}, {taken})
+    assert empty.options == {}
+    assert empty.default is None
+    assert empty.hint is not None
+    assert "插入" in empty.hint.message
+    assert assigned_only.options == {}
+    assert assigned_only.hint is not None
+    assert "拆掉" in assigned_only.hint.message or "插入" in assigned_only.hint.message
+
+
+def test_新建默认仍是9600_8N1_无流控_GBK() -> None:
+    """首次创建未改参数时，必须仍是默认 9600 8N1、无流控、GBK。"""
+    draft = default_create_draft(2222, "0403:6001|FT123")
+    params = draft_serial_params(draft)
+    assert draft.baud == 9600
+    assert draft.data_bits == 8
+    assert draft.parity == "N"
+    assert draft.stop_bits == 1
+    assert draft.flow_control == "none"
+    assert draft.decode == "gbk"
+    assert serial_format(params) == "8N1"
+    assert validate_draft(draft) is None
+
+
+def test_创建成功后连接信息可复制() -> None:
+    """成功态要直接给出人端地址和 Agent/MCP 说明，不要再绕一层。"""
+    copies = created_connection(_view(name="AC 控制台"))
+    assert copies.address == listen_address(2222)
+    assert copies.address == "127.0.0.1:2222"
+    assert "复制人端地址" in copies.address_label
+    assert "Agent" in copies.agent_label or "MCP" in copies.agent_label
+    assert "2222" in copies.agent_text
+    assert MCP_COMMAND in copies.agent_text
+    assert AGENT_PIPE in copies.agent_text
+    assert "不要直接打开 COM" in copies.agent_text
+
+
+def test_人端端口冲突就地提示且说明未创建() -> None:
+    """创建失败必须说清入口被占，并且明确线路还没留下。"""
+    error = create_port_conflict_error(2222)
+    assert error.field == "port"
+    assert "2222" in error.title
+    assert "占用" in error.title
+    assert "尚未创建" in error.message
+
+
+def test_COM路径变化后设备选项仍按同一USB身份() -> None:
+    """COM 只是当前路径；换口后选项键仍是同一 USB 身份。"""
+    identity = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    first = create_device_choices({identity: "COM6"}, set())
+    moved = create_device_choices({identity: "COM9"}, set())
+    key = identity_key(identity)
+    assert list(first.options) == [key]
+    assert list(moved.options) == [key]
+    assert "COM6" in first.options[key]
+    assert "COM9" in moved.options[key]
+    assert "0403:6001" in first.options[key]
+    assert "FT123" in moved.options[key]
 
 
 def _draft(*, port: int = 2222, baud: int = 9600) -> Draft:

@@ -1,6 +1,7 @@
 """线路设置的可测层：校验、串口格式、状态文案和保存影响。"""
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from comtee.hub import LineHold, LineStatus, SerialParams, UsbIdentity
@@ -23,6 +24,8 @@ FLOW_LABELS = {
     "dsrdtr": "DSR/DTR · 硬件流控",
 }
 CHARSET_LABELS = {"gbk": "GBK", "utf-8": "UTF-8"}
+MCP_COMMAND = "python -m comtee.mcp"
+AGENT_PIPE = r"\\.\pipe\comtee"
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,33 @@ class RecoveryNotice:
     message: str
 
 
+@dataclass(frozen=True)
+class DeviceHint:
+    """打开创建流程时，关于现场设备的可行动提示。"""
+
+    title: str
+    message: str
+
+
+@dataclass(frozen=True)
+class DeviceChoice:
+    """新建或编辑时的设备下拉内容和空设备提示。"""
+
+    options: dict[str, str]
+    default: str | None
+    hint: DeviceHint | None
+
+
+@dataclass(frozen=True)
+class ConnectionCopy:
+    """创建成功后可直接复制的人端地址和 Agent/MCP 说明。"""
+
+    address: str
+    address_label: str
+    agent_text: str
+    agent_label: str
+
+
 def serial_format(params: SerialParams) -> str:
     """由实际配置生成 8N1 这类串口格式，不写死。"""
     return f"{params.data_bits}{params.parity}{int(params.stop_bits)}"
@@ -139,6 +169,21 @@ def draft_serial_params(draft: Draft) -> SerialParams:
         parity=draft.parity,
         stop_bits=draft.stop_bits,
         flow_control=draft.flow_control,
+    )
+
+
+def default_create_draft(port: int, device_key: str = "", name: str = "") -> Draft:
+    """新建线路的默认草稿：9600 8N1、无流控、GBK。"""
+    return Draft(
+        name=name,
+        port=port,
+        baud=9600,
+        data_bits=8,
+        parity="N",
+        stop_bits=1,
+        flow_control="none",
+        decode="gbk",
+        device_key=device_key,
     )
 
 
@@ -189,6 +234,15 @@ def validate_draft(draft: Draft) -> FieldError | None:
             "device", "请选择一台可用的 USB 设备。", "同一台设备只能分配给一条线路。"
         )
     return None
+
+
+def create_port_conflict_error(port: int) -> FieldError:
+    """创建时人端入口被占：就地指出端口，并说明没有留下线路。"""
+    return FieldError(
+        "port",
+        f"人端入口 {port} 被其他程序占用",
+        "线路尚未创建，设备尚未被这条线路占用。请更换端口后再试。",
+    )
 
 
 def serial_changed(view: LineView, draft: Draft) -> bool:
@@ -392,16 +446,30 @@ def recovery_notice(previous: LineView, current: LineView) -> RecoveryNotice | N
 
 
 def agent_share_text(view: LineView) -> str:
-    """复制给已接入串通的 Agent 的线路说明。"""
+    """复制给已接入串通的 Agent 的线路与 MCP 连接说明。"""
     name = f"（线路名称：{view.name}）" if view.name else ""
     params = view.serial_params
     return (
         f"请通过串通访问人端入口 {view.human_entry}{name}。\n"
-        f"先用 list_lines 核对线路状态，再按需调用 read_line / write_line，必须指名 {view.human_entry}。\n"
+        f"Cursor 里用 MCP：{MCP_COMMAND}。"
+        f"Agent 端是本机命名管道 {AGENT_PIPE}，不是 TCP；"
+        "MCP 只做翻译，自己不打开设备。\n"
+        f"先用 list_lines 核对线路状态，再按需调用 read_line / write_line，"
+        f"必须指名 {view.human_entry}。\n"
         "不要直接打开 COM，不要创建、修改或拆掉线路，也不要修改串口参数。\n"
         f"当前参数：{params.baudrate} {serial_format(params)}，"
         f"{FLOW_LABELS.get(params.flow_control, params.flow_control)}；"
         f"Agent 字符集 {charset_label(view.decode)}。"
+    )
+
+
+def created_connection(view: LineView) -> ConnectionCopy:
+    """创建成功后直接可复制的人端地址和 Agent/MCP 说明。"""
+    return ConnectionCopy(
+        address=listen_address(view.human_entry),
+        address_label="复制人端地址",
+        agent_text=agent_share_text(view),
+        agent_label="复制 Agent/MCP 说明",
     )
 
 
@@ -418,6 +486,65 @@ def suggest_port(used: set[int], start: int = 2222) -> int:
 def identity_key(identity: UsbIdentity) -> str:
     """下拉框用的身份键，不是 COM 路径。"""
     return f"{identity.vid:04X}:{identity.pid:04X}|{identity.serial}"
+
+
+def usb_identity_text(identity: UsbIdentity) -> str:
+    """稳定 USB 身份的展示：VID:PID 与序列号。"""
+    vid_pid = f"{identity.vid:04X}:{identity.pid:04X}"
+    serial = identity.serial.strip()
+    if serial:
+        return f"{vid_pid} · 序列号 {serial}"
+    return vid_pid
+
+
+def device_option_label(path: str, identity: UsbIdentity) -> str:
+    """设备选项同时给出当前 COM 路径和稳定 USB 身份。"""
+    shown = path.strip() or "未接入"
+    return f"{shown} · USB {usb_identity_text(identity)}"
+
+
+def empty_device_hint(*, present: int, available: int) -> DeviceHint | None:
+    """打开创建流程时，没有可选设备就给出可行动提示。"""
+    if available > 0:
+        return None
+    if present > 0:
+        return DeviceHint(
+            "没有可分配的 USB 设备",
+            "现场设备都已分配给其他线路。请先拆掉一条线路，或再插入另一台 USB 转接器。",
+        )
+    return DeviceHint(
+        "没有可用的 USB 设备",
+        "现场没有可用的 USB 串口设备。请插入带序列号的 USB 转接器后再试；"
+        "蓝牙虚拟口不会出现在这里。",
+    )
+
+
+def create_device_choices(
+    paths: Mapping[UsbIdentity, str],
+    assigned: set[UsbIdentity],
+    *,
+    current: UsbIdentity | None = None,
+    current_path: str = "",
+) -> DeviceChoice:
+    """创建设备下拉：过滤已分配；编辑时只展示当前绑定。"""
+    if current is not None:
+        key = identity_key(current)
+        path = current_path or "未接入"
+        return DeviceChoice({key: device_option_label(path, current)}, key, None)
+    options: dict[str, str] = {}
+    default: str | None = None
+    for identity, path in paths.items():
+        if identity in assigned:
+            continue
+        key = identity_key(identity)
+        options[key] = device_option_label(path, identity)
+        if default is None:
+            default = key
+    return DeviceChoice(
+        options,
+        default,
+        empty_device_hint(present=len(paths), available=len(options)),
+    )
 
 
 def parse_identity_key(text: str) -> UsbIdentity:
