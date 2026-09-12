@@ -26,18 +26,21 @@ from comtee.line_edit import (
     FLOW_LABELS,
     PARITY_LABELS,
     Draft,
+    LineView,
     agent_share_text,
     charset_label,
     draft_serial_params,
+    failure_notices,
     format_bytes,
     format_last_rx,
     format_preview,
     identity_key,
     impact_text,
+    line_health,
     listen_address,
     parse_identity_key,
+    recovery_notice,
     serial_format,
-    split_status,
     status_to_view,
     suggest_port,
     validate_draft,
@@ -98,6 +101,7 @@ class Panel:
         self._form: dict[str, Any] = {}
         self._editing_entry: int | None = None
         self._notice_sig: tuple[object, ...] | None = None
+        self._views: dict[int, LineView] = {}
 
     def build(self) -> None:
         """画出外壳、对话框和定时刷新。"""
@@ -165,6 +169,7 @@ class Panel:
         if self._dialog_open:
             return
         lines = self._hub.list_lines()
+        self._track_recovery(lines)
         entries = [line.human_entry for line in lines]
         if entries != self._rendered_entries or (
             self._selected is not None and self._selected not in entries and entries
@@ -201,6 +206,7 @@ class Panel:
                 with self._detail:
                     self._fill_detail(selected)
             self._notice_sig = self._status_sig(selected)
+            self._seed_views(lines)
 
     def _render_empty(self) -> None:
         """还没有线路时的接入说明。"""
@@ -233,7 +239,7 @@ class Panel:
     def _rail_item(self, line: LineStatus, active: bool) -> None:
         """一条线路的列表项：端口最醒目。"""
         view = status_to_view(line, self._path_of(line))
-        status = split_status(view)
+        health = line_health(view)
         port = line.human_entry
 
         def choose() -> None:
@@ -250,16 +256,26 @@ class Panel:
             ui.button(on_click=choose, color=None)
             .props("flat no-caps unelevated")
             .classes("railitem" + (" active" if active else ""))
-            .tooltip(f"{port} · {line.name or '未命名线路'} · {status.badge}")
+            .tooltip(f"{port} · {line.name or '未命名线路'} · {health.badge}")
         )
         with btn, ui.element("div").classes("rail-line"):
             with ui.element("div").classes("rail-title"):
                 ui.label(str(port)).classes("mono")
                 ui.label(line.name or "未命名线路").classes("rail-alias")
-            state = ui.label(status.badge).classes(
-                f"rail-state rail-state-text {status.badge_class}"
+            state = ui.label(health.badge).classes(
+                f"rail-state rail-state-text {health.badge_class}"
             )
+            device = ui.label(health.device).classes(
+                f"rail-meta rail-device {health.device_class}"
+            )
+            human = ui.label(health.human).classes(
+                f"rail-meta rail-human {health.human_class}"
+            )
+            clients = ui.label(health.clients).classes("rail-meta rail-clients")
             self._labels[f"rail-state-{port}"] = state
+            self._labels[f"rail-device-{port}"] = device
+            self._labels[f"rail-human-{port}"] = human
+            self._labels[f"rail-clients-{port}"] = clients
         self._rail_buttons[port] = btn
 
     def _toggle_rail(self) -> None:
@@ -270,7 +286,7 @@ class Panel:
     def _fill_detail(self, line: LineStatus) -> None:
         """右侧详情：端口、分离的链路状态、完整串口格式。"""
         view = status_to_view(line, self._path_of(line))
-        status = split_status(view)
+        health = line_health(view)
         params = line.serial_params
         missing = line.hold == LineHold.WAITING
         with ui.element("div").classes("detail-top"):
@@ -285,8 +301,8 @@ class Panel:
                         .classes("line-alias")
                         .style("display:inline")
                     )
-            self._labels["badge"] = ui.label(status.badge).classes(
-                f"badge {status.badge_class}"
+            self._labels["badge"] = ui.label(health.badge).classes(
+                f"badge {health.badge_class}"
             )
         with ui.element("div").classes("endpoint"):
             self._labels["address"] = ui.label(
@@ -305,11 +321,17 @@ class Panel:
                 color=None,
             ).props("flat no-caps").classes("quiet link-button")
         with ui.element("div").classes("link-status"):
-            self._labels["human"] = ui.label(status.human).classes(
-                f"status-item {status.human_class}"
+            self._labels["rw"] = ui.label(health.rw_label).classes(
+                f"status-item {self._rw_class(health.writable, line.human_listening)}"
             )
-            self._labels["device"] = ui.label(status.device).classes(
-                f"status-item {status.device_class}"
+            self._labels["human"] = ui.label(health.human).classes(
+                f"status-item {health.human_class}"
+            )
+            self._labels["device"] = ui.label(health.device).classes(
+                f"status-item {health.device_class}"
+            )
+            self._labels["clients-status"] = ui.label(health.clients).classes(
+                "status-item"
             )
         self._labels["notices"] = ui.element("div")
         with self._labels["notices"]:
@@ -400,8 +422,8 @@ class Panel:
             ui.html(f"<small>{title}</small>", sanitize=False)
             self._labels[key] = ui.label(value).classes("activity-value mono")
 
-    def _fill_notices(self, line: LineStatus, view: Any) -> None:
-        """保存结果、入口冲突、等待设备和占用冲突。"""
+    def _fill_notices(self, line: LineStatus, view: LineView) -> None:
+        """保存结果、恢复反馈，以及每个失败状态的原因和下一步。"""
         notice = self._notice
         if notice and notice.get("entry") == line.human_entry:
             with ui.element("section").classes("notice success"):
@@ -415,36 +437,28 @@ class Panel:
                 ui.button("关闭", on_click=self._dismiss_notice).props(
                     "flat no-caps"
                 ).classes("quiet")
-        if not line.human_listening:
-            with ui.element("section").classes("notice error"):
-                ui.label(f"人端入口 {line.human_entry} 被其他程序占用").classes(
-                    "notice-title"
-                )
-                ui.label(
-                    "Telnet 暂时无法接入。请关闭占用这个端口的程序，或在“线路设置”里换一个入口端口。"
-                )
-                ui.button(
-                    "更换入口端口",
-                    on_click=lambda port=line.human_entry: self._open_editor(port),
-                ).props("no-caps unelevated")
-        if line.hold == LineHold.WAITING:
-            with ui.element("section").classes("notice"):
-                ui.label("等待设备重新接入").classes("notice-title")
-                ui.label(
-                    "线路和已连接的人端保持。插回同一 USB 转接器后会自动恢复，即使 COM 路径变化。"
-                )
-                ui.label("当前写入不会发送到设备，也不会在重连后补发。")
-        if line.hold == LineHold.CONFLICT:
-            path = view.device_path or "该串口"
-            with ui.element("section").classes("notice error"):
-                ui.label(f"{path} 正被其他程序占用").classes("notice-title")
-                ui.label(
-                    "请关闭直接打开这个串口的软件；释放后串通会自动重试。"
-                    "当前写入暂不发送到设备。"
-                )
+        for item in failure_notices(view):
+            cls = "notice error" if item.severity == "error" else "notice"
+            with ui.element("section").classes(cls):
+                ui.label(item.title).classes("notice-title")
+                ui.label(item.reason)
+                ui.label(item.next_action)
+                with ui.element("div").classes("notice-actions"):
+                    if item.action:
+                        ui.button(
+                            item.action_label,
+                            on_click=lambda port=line.human_entry: self._retry(port),
+                        ).props("no-caps unelevated")
+                    if item.kind == "port":
+                        ui.button(
+                            "更换入口端口",
+                            on_click=lambda port=line.human_entry: self._open_editor(
+                                port
+                            ),
+                        ).props("no-caps unelevated")
 
     def _dismiss_notice(self) -> None:
-        """关掉保存成功提示。"""
+        """关掉保存成功或恢复反馈。"""
         self._notice = None
         self._render_content()
 
@@ -452,17 +466,33 @@ class Panel:
         """一秒一次更新状态文字，不拆掉详情和折叠。"""
         selected = self._line(lines)
         view = status_to_view(selected, self._path_of(selected))
-        status = split_status(view)
+        health = line_health(view)
         params = selected.serial_params
         missing = selected.hold == LineHold.WAITING
         self._set("port", str(selected.human_entry))
         self._set("alias", selected.name or "")
         if "badge" in self._labels:
-            self._labels["badge"].set_text(status.badge)
-            self._labels["badge"].classes(replace=f"badge {status.badge_class}".strip())
+            self._labels["badge"].set_text(health.badge)
+            self._labels["badge"].classes(replace=f"badge {health.badge_class}".strip())
         self._set("address", listen_address(selected.human_entry))
-        self._set("human", status.human)
-        self._set("device", status.device)
+        self._set("rw", health.rw_label)
+        if "rw" in self._labels:
+            self._labels["rw"].classes(
+                replace=(
+                    f"status-item {self._rw_class(health.writable, selected.human_listening)}"
+                ).strip()
+            )
+        self._set("human", health.human)
+        if "human" in self._labels:
+            self._labels["human"].classes(
+                replace=f"status-item {health.human_class}".strip()
+            )
+        self._set("device", health.device)
+        if "device" in self._labels:
+            self._labels["device"].classes(
+                replace=f"status-item {health.device_class}".strip()
+            )
+        self._set("clients-status", health.clients)
         self._set("baud", str(params.baudrate))
         self._set("format", serial_format(params))
         self._set(
@@ -493,9 +523,24 @@ class Panel:
             else "尚无设备输出；没有输出本身不能证明参数错误。",
         )
         for line in lines:
-            key = f"rail-state-{line.human_entry}"
-            item = split_status(status_to_view(line, self._path_of(line)))
-            self._set(key, item.badge)
+            item = line_health(status_to_view(line, self._path_of(line)))
+            port = line.human_entry
+            self._set(f"rail-state-{port}", item.badge)
+            if f"rail-state-{port}" in self._labels:
+                self._labels[f"rail-state-{port}"].classes(
+                    replace=f"rail-state rail-state-text {item.badge_class}".strip()
+                )
+            self._set(f"rail-device-{port}", item.device)
+            if f"rail-device-{port}" in self._labels:
+                self._labels[f"rail-device-{port}"].classes(
+                    replace=f"rail-meta rail-device {item.device_class}".strip()
+                )
+            self._set(f"rail-human-{port}", item.human)
+            if f"rail-human-{port}" in self._labels:
+                self._labels[f"rail-human-{port}"].classes(
+                    replace=f"rail-meta rail-human {item.human_class}".strip()
+                )
+            self._set(f"rail-clients-{port}", item.clients)
         sig = self._status_sig(selected)
         if "notices" in self._labels and sig != self._notice_sig:
             self._notice_sig = sig
@@ -511,6 +556,62 @@ class Panel:
             else (self._notice.get("entry"), self._notice.get("title"))
         )
         return (line.human_entry, line.hold, line.human_listening, notice)
+
+    def _rw_class(self, writable: bool, listening: bool) -> str:
+        """可读写用正常色，不可写用错误色，人端未监听但设备可写用等待色。"""
+        if writable and listening:
+            return ""
+        if writable:
+            return "waiting"
+        return "error-color"
+
+    def _seed_views(self, lines: Sequence[LineStatus]) -> None:
+        """第一次看见线路时记下快照，避免把初始状态当成恢复。"""
+        for line in lines:
+            if line.human_entry not in self._views:
+                self._views[line.human_entry] = status_to_view(
+                    line, self._path_of(line)
+                )
+
+    def _track_recovery(self, lines: Sequence[LineStatus]) -> None:
+        """设备插回、占用解除或入口恢复监听时给一句反馈，只报一次。"""
+        live = {line.human_entry for line in lines}
+        for port in [entry for entry in self._views if entry not in live]:
+            self._views.pop(port, None)
+        for line in lines:
+            view = status_to_view(line, self._path_of(line))
+            previous = self._views.get(line.human_entry)
+            self._views[line.human_entry] = view
+            if previous is None:
+                continue
+            recovered = recovery_notice(previous, view)
+            if recovered is None:
+                continue
+            ui.notify(recovered.title)
+            if line.human_entry == self._selected:
+                self._notice = {
+                    "entry": line.human_entry,
+                    "title": recovered.title,
+                    "message": recovered.message,
+                    "reconnect": False,
+                }
+
+    def _retry(self, human_entry: int) -> None:
+        """对可恢复状态再占口、再听；不补发旧写入。"""
+        try:
+            after = self._hub.retry_line(human_entry)
+        except KeyError:
+            ui.notify("没有这条线路")
+            return
+        before = self._notice
+        self._track_recovery(self._hub.list_lines())
+        view = status_to_view(after, self._path_of(after))
+        health = line_health(view)
+        if health.retry_hold or health.retry_listen:
+            ui.notify("仍未恢复，请按提示处理后再试")
+        elif self._notice is before:
+            ui.notify("线路已恢复")
+        self._render_content()
 
     def _set(self, key: str, text: str) -> None:
         """更新已有标签；控件被拆掉时忽略。"""

@@ -45,12 +45,13 @@ html, body, #app {height:100%;margin:0;overflow:hidden;}
 .rail-alias {font-size:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#4e6576}
 .rail-state {display:flex;align-items:center;gap:6px;font-size:11px;color:#477258;margin-top:6px}
 .rail-state:before,.badge:before,.status-item:before {content:'';width:6px;height:6px;background:currentColor;border-radius:50%;flex-shrink:0}
+.rail-meta {font-size:11px;color:#738694;line-height:1.45}
 .waiting {color:#916615 !important}
 .error-color {color:#ac453e !important}
 .split.collapsed {grid-template-columns:80px minmax(0,1fr)}
 .split.collapsed .rail {padding:18px 7px}
 .split.collapsed .railhead {margin:0 0 12px;justify-content:center}
-.split.collapsed .railhead .rail-title-text,.split.collapsed .rail-alias,.split.collapsed .rail-state-text {display:none}
+.split.collapsed .railhead .rail-title-text,.split.collapsed .rail-alias,.split.collapsed .rail-state-text,.split.collapsed .rail-meta {display:none}
 .split.collapsed .railitem {padding:12px 4px !important;min-height:68px;text-align:center}
 .split.collapsed .rail-title,.split.collapsed .rail-state {justify-content:center}
 .split.collapsed .rail-title .mono {font-size:14px}
@@ -89,6 +90,7 @@ html, body, #app {height:100%;margin:0;overflow:hidden;}
 .detail-bottom {display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:16px;color:#7b8d9b;font-size:11px}
 .notice {border-radius:7px;background:#fff6e3;border:1px solid #efdcaf;padding:13px 14px;margin:16px 0 7px;line-height:1.7;font-size:12px;color:#865f1d}
 .notice-title {display:block;font-size:13px;margin-bottom:3px;font-weight:650}
+.notice-actions {display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .notice.error {color:#aa443b;background:#fff2ef;border-color:#f0d1cb}
 .notice.success {color:#2d6b47;background:#eef7f0;border-color:#d2e6d7}
 .empty {align-self:center;width:100%;text-align:center;padding:55px 24px}

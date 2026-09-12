@@ -371,6 +371,13 @@ class Comtee:
         """对照现场插着的设备，进入等待或再占口。"""
         self._reconcile()
 
+    def retry_line(self, human_entry: int) -> LineStatus:
+        """对一条线路再占口、再听人端入口；不补发旧写入，不改编排。"""
+        if human_entry not in self._lines:
+            raise KeyError(human_entry)
+        self._reconcile()
+        return self._status(self._lines[human_entry])
+
     def _restore(self) -> None:
         """从存档恢复线路并再占口。"""
         for record in self._store.load():
