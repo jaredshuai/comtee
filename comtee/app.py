@@ -1,7 +1,6 @@
 """串通进程：单例、恢复线路、托盘常驻、面板可关可再开。"""
 
 import os
-import sys
 import threading
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +13,7 @@ from comtee.hub import Comtee, UsbIdentity
 from comtee.native_window import install_hide_on_close
 from comtee.panel import build_panel
 from comtee.persist import FileArrangementStore, UserSettings
+from comtee.runtime import launch_command
 from comtee.singleton import InstanceLock
 from comtee.telnet import TelnetEntries
 from comtee.usb_serial import UsbSerial, windows_usb_serial
@@ -38,7 +38,7 @@ def run() -> None:
         human=human,
     )
     agent_pipe = AgentPipe(hub)
-    command = f'"{sys.executable}" -m comtee'
+    command = launch_command()
     autostart = PreferredAutoStart(
         windows_autostart(command),
         UserSettings(data_dir / "settings.json"),

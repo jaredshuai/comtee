@@ -6,7 +6,7 @@ import json
 import threading
 from typing import Any
 
-from comtee.hub import Agent, AgentForbidden, Comtee, LineStatus
+from comtee.hub import Agent, AgentForbidden, Comtee, LineHold, LineStatus
 
 PIPE_NAME = r"\\.\pipe\comtee"
 
@@ -47,8 +47,23 @@ class AgentBridge:
             agent.leave()
         self._agents.clear()
 
+    def _rehome_agents(self) -> None:
+        """入口迁走后，把缓存跟到新端口；旧端口不再指向这条线路。"""
+        live = {line.human_entry for line in self._hub.list_lines()}
+        remapped: dict[int, Agent] = {}
+        for agent in self._agents.values():
+            current = agent.human_entry
+            if current not in live:
+                agent.leave()
+                continue
+            remapped[current] = agent
+        self._agents = remapped
+
     def _agent(self, human_entry: int) -> Agent:
         """拿到指名线路上的 Agent；没有则进场。"""
+        self._rehome_agents()
+        if human_entry not in {line.human_entry for line in self._hub.list_lines()}:
+            raise KeyError(human_entry)
         existing = self._agents.get(human_entry)
         if existing is not None:
             return existing
@@ -70,12 +85,25 @@ class AgentBridge:
         """按该线路解码把字写成原字节打进去。"""
         try:
             decode = self._decode_of(human_entry)
-            self._agent(human_entry).write(text.encode(decode, errors="replace"))
+            sent = self._agent(human_entry).write(text.encode(decode, errors="replace"))
         except KeyError:
             return {"ok": False, "error": "没有这条线路"}
         except AgentForbidden as exc:
             return {"ok": False, "error": str(exc)}
+        if not sent:
+            return {"ok": False, "error": self._write_rejected(human_entry)}
         return {"ok": True}
+
+    def _write_rejected(self, human_entry: int) -> str:
+        """未占口写入必须明确失败，不得让调用方当成已发送。"""
+        for line in self._hub.list_lines():
+            if line.human_entry == human_entry:
+                if line.hold == LineHold.WAITING:
+                    return "等待设备，写入未发送"
+                if line.hold == LineHold.CONFLICT:
+                    return "占用冲突，写入未发送"
+                break
+        return "设备未占口，写入未发送"
 
     def _decode_of(self, human_entry: int) -> str:
         """指名线路当前的解码。"""
@@ -96,6 +124,9 @@ def _line_view(line: LineStatus) -> dict:
         "decode": line.decode,
         "human_clients": line.human_clients,
         "agent_connected": line.agent_connected,
+        "name": line.name,
+        "human_listening": line.human_listening,
+        "writable": line.hold == LineHold.HELD,
     }
 
 

@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
-from comtee import Comtee
+from comtee import Comtee, HumanEntryOccupied, LineHold
 from comtee.telnet import TelnetEntries, TelnetFilter
 from tests.test_comtee import FakeSerial, MemoryStore, _plugged
 
@@ -109,8 +109,8 @@ def test_进场后同一选项不再回以免打环() -> None:
     assert session.replies() == b""
 
 
-def test_人端入口被占则线路在但不听() -> None:
-    """绑不上人端入口时编排仍在，标准 Telnet 连不上这条入口。"""
+def test_创建线路时入口被占则不留下半条线路() -> None:
+    """绑不上人端入口时，交互创建必须回滚，设备不得被这条未建成的线路占用。"""
     blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     blocker.bind(("127.0.0.1", 0))
     blocker.listen(1)
@@ -120,10 +120,10 @@ def test_人端入口被占则线路在但不听() -> None:
     human = TelnetEntries()
     hub = Comtee(serial, MemoryStore(), human=human)
     try:
-        hub.create_line(port, device)
-        assert hub.list_lines()[0].human_entry == port
-        with pytest.raises(KeyError):
-            human.listen_address(port)
+        with pytest.raises(HumanEntryOccupied):
+            hub.create_line(port, device)
+        assert hub.list_lines() == ()
+        assert not serial.is_held(device)
         sock = socket.create_connection(("127.0.0.1", port), timeout=0.5)
         sock.sendall(b"not-telnet")
         time.sleep(0.1)
@@ -132,6 +132,43 @@ def test_人端入口被占则线路在但不听() -> None:
     finally:
         blocker.close()
         human.shutdown()
+
+
+def test_恢复编排时入口被占线路仍在且未监听() -> None:
+    """启动恢复时入口冲突只影响人端监听；对方放口后刷新再听。"""
+    store = MemoryStore()
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    first_human = TelnetEntries()
+    hub = Comtee(serial, store, human=first_human)
+    port = _free_loopback_port()
+    hub.create_line(port, device)
+    hub.shutdown()
+    first_human.shutdown()
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", port))
+    blocker.listen(1)
+    restored_serial = FakeSerial()
+    restored_serial.plug(device)
+    restored_human = TelnetEntries()
+    try:
+        restored = Comtee(restored_serial, store, human=restored_human)
+        [line] = restored.list_lines()
+        assert line.human_entry == port
+        assert line.human_listening is False
+        assert line.hold == LineHold.HELD
+        with pytest.raises(KeyError):
+            restored_human.listen_address(port)
+        blocker.close()
+        blocker = None
+        restored.refresh()
+        [after] = restored.list_lines()
+        assert after.human_listening is True
+        restored_human.listen_address(port)
+    finally:
+        if blocker is not None:
+            blocker.close()
+        restored_human.shutdown()
 
 
 def test_拆线路后入口停听() -> None:

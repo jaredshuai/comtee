@@ -1,0 +1,78 @@
+# 正式发版：推 vX.Y.Z 标签后，在 Windows runner 上跑本机同一套打包脚本，再挂到 GitHub Release。
+# 手工 workflow_dispatch 只打安装包、上传制品，不建 Release，用来试云端打包。
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen --group dev --group packaging
+
+      - name: Quality gates
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run ty check
+          uv run pytest
+
+      - name: Check tag matches project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: uv run python -m comtee.release_tag --tag "${{ github.ref }}"
+
+      - name: Enable MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        run: powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Force
+
+      - name: Upload setup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: comtee-setup
+          path: installer/dist/Comtee-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $setup = Get-ChildItem -Path installer/dist -Filter "Comtee-Setup-*.exe" |
+            Select-Object -First 1
+          if (-not $setup) {
+            throw "Comtee-Setup-*.exe not found"
+          }
+          $version = uv run python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+          $version = $version.Trim()
+          gh release create "${{ github.ref_name }}" $setup.FullName --generate-notes --title "串通 $version"
