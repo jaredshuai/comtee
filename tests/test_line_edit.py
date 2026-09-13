@@ -84,6 +84,23 @@ def test_只改名称或字符集不重新占口改参数会短暂中断() -> No
     assert "插回" in waiting.message
 
 
+def test_同时改入口和串口参数要同时说明迁移和中断() -> None:
+    """入口迁移和重新占口不是互斥说明。"""
+    both = impact_text(_view(), _draft(port=3333, baud=115200), creating=False)
+    waiting = impact_text(
+        _view(hold=LineHold.WAITING),
+        _draft(port=3333, baud=115200),
+        creating=False,
+    )
+    assert "入口" in both.message
+    assert "短暂中断" in both.message
+    assert both.reopens_serial is True
+    assert both.warning is True
+    assert "入口" in waiting.message
+    assert "插回" in waiting.message
+    assert waiting.reopens_serial is False
+
+
 def test_折叠线路栏仍保留名称端口和状态() -> None:
     """折叠后至少还能认出线路、入口和占口状态。"""
     item = collapsed_rail(_view())
@@ -105,11 +122,12 @@ def test_详情优先名称端口状态其次才是串口参数() -> None:
     assert layers.secondary.baud == "9600"
     assert layers.secondary.serial_format == "8N1"
     assert layers.secondary.charset == "GBK"
-    assert "0403:6001" in layers.device_key
+    assert layers.device_key == "0403:6001|FT123"
     assert layers.device_path == "COM6"
-    primary = {layers.primary.name, str(layers.primary.port), layers.primary.status}
-    assert layers.device_key not in primary
-    assert layers.device_path not in primary
+    assert "0403:6001" not in layers.primary.name
+    assert "0403:6001" not in layers.primary.status
+    assert "COM6" not in layers.primary.name
+    assert "COM6" not in layers.primary.status
 
 
 def test_拆线路说明会停止监听并释放占口() -> None:

@@ -317,7 +317,7 @@ def serial_changed(view: LineView, draft: Draft) -> bool:
 
 
 def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impact:
-    """保存前说明会不会换入口、会不会短暂中断串口。"""
+    """保存前说明会不会换入口、会不会重新占口；两项同时改时都要说清。"""
     if creating or view is None:
         return Impact(
             "创建成功后，设备由串通占用。你可以复制地址连接 Telnet，或复制线路说明交给 Agent。",
@@ -332,12 +332,25 @@ def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impac
             if view.human_clients
             else "Telnet 书签需要更新；"
         )
-        return Impact(
-            f"保存后切换人端入口。{clients}Agent 后续需指名新端口。新端口不可用时，原线路与配置保留。",
-            True,
-            "保存并切换入口",
-            False,
+        message = (
+            f"保存后切换人端入口。{clients}Agent 后续需指名新端口。"
+            "新端口不可用时，原线路与配置保留。"
         )
+        if params_change and view.hold == LineHold.WAITING:
+            return Impact(
+                f"{message} 串口参数也会保存，设备插回时按新参数占口。",
+                True,
+                "保存并切换入口",
+                False,
+            )
+        if params_change:
+            return Impact(
+                f"{message} 串口参数有变化：保存时会重新占串口，数据传输会短暂中断。",
+                True,
+                "保存并切换入口",
+                True,
+            )
+        return Impact(message, True, "保存并切换入口", False)
     if params_change:
         if view.hold == LineHold.WAITING:
             message = "设备未接入：先保存设置，设备插回时按新参数占口。"

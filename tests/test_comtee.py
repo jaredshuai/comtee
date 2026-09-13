@@ -987,6 +987,8 @@ def test_参数应用失败时旧监听和客户端关系保持() -> None:
     assert client.write(b"keep") is True
     assert serial.written(device) == b"keep"
     assert serial.held_params(device) == SerialParams(baudrate=19200)
+    serial.emit(device, b"from-dev")
+    assert client.received() == b"from-dev"
 
 
 def test_参数应用失败则保留原串口配置() -> None:

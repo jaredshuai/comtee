@@ -528,9 +528,9 @@ class Panel:
             else "尚无设备输出；没有输出本身不能证明参数错误。",
         )
         for line in lines:
-            view = status_to_view(line, self._path_of(line))
-            item = line_health(view)
-            summary = collapsed_rail(view)
+            rail_view = status_to_view(line, self._path_of(line))
+            item = line_health(rail_view)
+            summary = collapsed_rail(rail_view)
             port = line.human_entry
             self._set(f"rail-name-{port}", summary.name)
             self._set(f"rail-port-{port}", str(summary.port))
