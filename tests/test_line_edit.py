@@ -12,6 +12,7 @@ from comtee.line_edit import (
     Draft,
     LineView,
     agent_share_text,
+    apply_device_rescan,
     collapsed_rail,
     create_device_choices,
     create_port_conflict_error,
@@ -290,9 +291,53 @@ def test_没有设备时新建给出可行动提示() -> None:
     assert empty.default is None
     assert empty.hint is not None
     assert "插入" in empty.hint.message
+    assert empty.hint.action == "rescan"
+    assert empty.hint.action_label == "重新扫描设备"
     assert assigned_only.options == {}
     assert assigned_only.hint is not None
     assert "拆掉" in assigned_only.hint.message or "插入" in assigned_only.hint.message
+    assert assigned_only.hint.action_label == "重新扫描设备"
+
+
+def test_重新扫描插入设备后出现COM和USB身份且保留草稿() -> None:
+    """弹窗开着插入设备后，扫描只补设备选项，不丢掉已填名称和端口。"""
+    draft = default_create_draft(3333, "", name="实验台")
+    identity = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    result = apply_device_rescan({identity: "COM6"}, set(), draft)
+    assert draft.name == "实验台"
+    assert draft.port == 3333
+    assert result.found is True
+    assert result.notice is None
+    assert result.device_key == identity_key(identity)
+    assert "COM6" in result.choices.options[result.device_key]
+    assert "0403:6001" in result.choices.options[result.device_key]
+    assert "FT123" in result.choices.options[result.device_key]
+    created = default_create_draft(draft.port, result.device_key, name=draft.name)
+    assert validate_draft(created) is None
+
+
+def test_重新扫描仍无设备时保留草稿并给出提示() -> None:
+    """扫描失败不得拆掉已填表单，并说清下一步。"""
+    draft = default_create_draft(3333, "", name="实验台")
+    result = apply_device_rescan({}, set(), draft)
+    assert result.found is False
+    assert draft.name == "实验台"
+    assert draft.port == 3333
+    assert result.notice is not None
+    assert "插入" in result.notice.message
+    assert result.notice.action_label == "重新扫描设备"
+
+
+def test_重新扫描仍过滤已分配设备() -> None:
+    """扫描不能把已经占着的设备重新放进新建选项。"""
+    taken = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    free = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT456")
+    draft = default_create_draft(2222, "", name="实验台")
+    result = apply_device_rescan({taken: "COM6", free: "COM7"}, {taken}, draft)
+    assert result.found is True
+    assert identity_key(taken) not in result.choices.options
+    assert result.device_key == identity_key(free)
+    assert "COM7" in result.choices.options[result.device_key]
 
 
 def test_新建默认仍是9600_8N1_无流控_GBK() -> None:

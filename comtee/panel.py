@@ -28,7 +28,9 @@ from comtee.line_edit import (
     DeviceChoice,
     Draft,
     LineView,
+    RescanResult,
     agent_share_text,
+    apply_device_rescan,
     charset_label,
     collapsed_rail,
     create_device_choices,
@@ -719,7 +721,7 @@ class Panel:
                     f"<h2>{'线路设置' if line else '新建线路'}</h2>",
                     sanitize=False,
                 )
-            ui.label(subtitle)
+            self._form["subtitle"] = ui.label(subtitle)
             self._icon_button("close", self._close_editor, "关闭对话框")
         with ui.element("div").classes("dialog-body"):
             error_box = ui.element("div").classes("notice error").style("display:none")
@@ -729,10 +731,30 @@ class Panel:
             self._form["error_box"] = error_box
             self._form["error_title"] = error_title
             self._form["error_message"] = error_message
-            if creating and choices.hint is not None:
-                with ui.element("section").classes("notice"):
-                    ui.label(choices.hint.title).classes("notice-title")
-                    ui.label(choices.hint.message)
+            if creating:
+                hint_box = ui.element("section").classes("notice")
+                if choices.hint is None:
+                    hint_box.style("display:none")
+                with hint_box:
+                    hint_title = ui.label(
+                        choices.hint.title if choices.hint is not None else ""
+                    ).classes("notice-title")
+                    hint_message = ui.label(
+                        choices.hint.message if choices.hint is not None else ""
+                    )
+                    action_label = (
+                        choices.hint.action_label
+                        if choices.hint is not None and choices.hint.action_label
+                        else "重新扫描设备"
+                    )
+                    with ui.element("div").classes("notice-actions"):
+                        ui.button(
+                            action_label,
+                            on_click=self._rescan_create_devices,
+                        ).props("no-caps unelevated")
+                self._form["device_hint_box"] = hint_box
+                self._form["device_hint_title"] = hint_title
+                self._form["device_hint_message"] = hint_message
             self._form["name"] = ui.input(
                 "线路名称",
                 value=name_value,
@@ -776,7 +798,19 @@ class Panel:
                     "选项同时给出当前 COM 路径和稳定 USB 身份（VID:PID、序列号）。"
                     "已被其他线路使用的设备不可重复选择。"
                 )
-            ui.label(device_help).classes("tiny muted")
+            self._form["device_help"] = ui.label(device_help).classes("tiny muted")
+            if creating:
+                rescan_quiet = (
+                    ui.button(
+                        "重新扫描设备",
+                        on_click=self._rescan_create_devices,
+                    )
+                    .props("flat no-caps")
+                    .classes("quiet link-button")
+                )
+                if choices.hint is not None:
+                    rescan_quiet.style("display:none")
+                self._form["device_rescan_quiet"] = rescan_quiet
             ui.label("串口参数").classes("form-section")
             with ui.element("div").style(
                 "display:grid;grid-template-columns:1fr 1fr;gap:14px"
@@ -871,6 +905,50 @@ class Panel:
         )
         if self._form["save"] is not None:
             self._form["save"].set_text(impact.submit_label)
+
+    def _rescan_create_devices(self) -> None:
+        """弹窗内重新读取现场 USB 设备，不重建已填表单。"""
+        used = {item.human_entry for item in self._hub.list_lines()}
+        draft = self._read_draft(None)
+        if draft is None:
+            draft = default_create_draft(suggest_port(used))
+        assigned = {item.device for item in self._hub.list_lines()}
+        result = apply_device_rescan(self._list_paths(), assigned, draft)
+        self._apply_create_device_rescan(result)
+        if result.found:
+            self._refresh_impact(None)
+
+    def _apply_create_device_rescan(self, result: RescanResult) -> None:
+        """把扫描结果写到设备下拉和提示，保留名称、端口和串口参数。"""
+        options = result.choices.options or {"": "没有可用设备"}
+        value = result.device_key if result.found else ""
+        device = self._form["device"]
+        device.set_options(options, value=value)
+        save = self._form.get("save")
+        if result.found:
+            device.enable()
+            if save is not None:
+                save.enable()
+            self._form["device_hint_box"].style("display:none")
+            self._form["device_rescan_quiet"].style("display:inline-flex")
+            self._form["device_help"].set_text(
+                "选项同时给出当前 COM 路径和稳定 USB 身份（VID:PID、序列号）。"
+                "已被其他线路使用的设备不可重复选择。"
+            )
+            self._form["subtitle"].set_text("选择 USB 设备，留一个人端入口。")
+            return
+        device.disable()
+        if save is not None:
+            save.disable()
+        if result.notice is not None:
+            self._form["device_hint_title"].set_text(result.notice.title)
+            self._form["device_hint_message"].set_text(result.notice.message)
+        self._form["device_hint_box"].style("display:block")
+        self._form["device_rescan_quiet"].style("display:none")
+        self._form["device_help"].set_text(
+            "没有可选设备时无法创建线路。COM 路径会变，请看 USB 身份。"
+        )
+        self._form["subtitle"].set_text("先接入可用的 USB 转接器，再创建线路。")
 
     def _read_draft(self, line: LineStatus | None) -> Draft | None:
         """从对话框控件读出一份草稿；尚未画完则空。"""

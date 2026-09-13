@@ -191,6 +191,8 @@ class DeviceHint:
 
     title: str
     message: str
+    action: str = ""
+    action_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -200,6 +202,16 @@ class DeviceChoice:
     options: dict[str, str]
     default: str | None
     hint: DeviceHint | None
+
+
+@dataclass(frozen=True)
+class RescanResult:
+    """重新扫描现场设备后的下拉内容和是否发现可用设备。"""
+
+    choices: DeviceChoice
+    device_key: str
+    found: bool
+    notice: DeviceHint | None
 
 
 @dataclass(frozen=True)
@@ -639,12 +651,28 @@ def empty_device_hint(*, present: int, available: int) -> DeviceHint | None:
         return DeviceHint(
             "没有可分配的 USB 设备",
             "现场设备都已分配给其他线路。请先拆掉一条线路，或再插入另一台 USB 转接器。",
+            "rescan",
+            "重新扫描设备",
         )
     return DeviceHint(
         "没有可用的 USB 设备",
-        "现场没有可用的 USB 串口设备。请插入带序列号的 USB 转接器后再试；"
-        "蓝牙虚拟口不会出现在这里。",
+        "现场没有可用的 USB 串口设备。请插入带序列号的 USB 转接器，"
+        "然后点「重新扫描设备」；蓝牙虚拟口不会出现在这里。",
+        "rescan",
+        "重新扫描设备",
     )
+
+
+def apply_device_rescan(
+    paths: Mapping[UsbIdentity, str],
+    assigned: set[UsbIdentity],
+    draft: Draft,
+) -> RescanResult:
+    """按现场重新枚举设备；只更新设备选项，不改名称、端口和串口参数。"""
+    choices = create_device_choices(paths, assigned)
+    if choices.default:
+        return RescanResult(choices, choices.default, True, None)
+    return RescanResult(choices, draft.device_key, False, choices.hint)
 
 
 def create_device_choices(
