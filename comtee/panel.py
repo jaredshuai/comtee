@@ -25,11 +25,18 @@ from comtee.line_edit import (
     CHARSET_LABELS,
     FLOW_LABELS,
     PARITY_LABELS,
+    DeviceChoice,
     Draft,
     LineView,
+    RescanResult,
     agent_share_text,
+    apply_device_rescan,
     charset_label,
     collapsed_rail,
+    create_device_choices,
+    create_port_conflict_error,
+    created_connection,
+    default_create_draft,
     detail_layers,
     draft_serial_params,
     failure_notices,
@@ -431,6 +438,7 @@ class Panel:
         """保存结果、恢复反馈，以及每个失败状态的原因和下一步。"""
         notice = self._notice
         if notice and notice.get("entry") == line.human_entry:
+            copies = created_connection(view)
             with ui.element("section").classes("notice success"):
                 ui.label(str(notice["title"])).classes("notice-title")
                 ui.label(str(notice["message"]))
@@ -439,6 +447,23 @@ class Panel:
                         f"请将 Telnet 书签更新为 {listen_address(line.human_entry)}；"
                         f"Agent 后续请指名 {line.human_entry}。"
                     )
+                if notice.get("copy_connection"):
+                    ui.label(copies.address).classes("mono")
+                    with ui.element("div").classes("notice-actions"):
+                        ui.button(
+                            copies.address_label,
+                            on_click=lambda text=copies.address: self._copy(
+                                text, "人端地址已复制"
+                            ),
+                            color=None,
+                        ).props("flat no-caps").classes("quiet link-button")
+                        ui.button(
+                            copies.agent_label,
+                            on_click=lambda text=copies.agent_text: self._copy(
+                                text, "Agent/MCP 说明已复制"
+                            ),
+                            color=None,
+                        ).props("flat no-caps").classes("quiet link-button")
                 ui.button("关闭", on_click=self._dismiss_notice).props(
                     "flat no-caps"
                 ).classes("quiet")
@@ -664,21 +689,39 @@ class Panel:
         """完整设置：端口、波特率、数据位、校验、停止位、流控、字符集。"""
         creating = line is None
         used = {item.human_entry for item in self._hub.list_lines()}
-        port_value = line.human_entry if line else suggest_port(used)
-        name_value = line.name if line else ""
-        params = line.serial_params if line else None
-        baud_value = params.baudrate if params else 9600
+        choices = self._device_options(line)
+        if line is None:
+            seed = default_create_draft(suggest_port(used))
+            port_value = seed.port
+            name_value = seed.name
+            baud_value = seed.baud
+            flow_value = seed.flow_control
+            bits_value = str(seed.data_bits)
+            parity_value = seed.parity
+            stop_value = str(seed.stop_bits)
+            decode_value = seed.decode
+            if choices.hint is not None:
+                subtitle = "先接入可用的 USB 转接器，再创建线路。"
+            else:
+                subtitle = "选择 USB 设备，留一个人端入口。"
+        else:
+            params = line.serial_params
+            port_value = line.human_entry
+            name_value = line.name
+            baud_value = params.baudrate
+            flow_value = params.flow_control
+            bits_value = str(params.data_bits)
+            parity_value = params.parity
+            stop_value = str(params.stop_bits)
+            decode_value = line.decode
+            subtitle = f"当前入口 {line.human_entry} · 修改后保存生效"
         with ui.element("div").classes("dialoghead"):
             with ui.element("div"):
                 ui.html(
                     f"<h2>{'线路设置' if line else '新建线路'}</h2>",
                     sanitize=False,
                 )
-            ui.label(
-                f"当前入口 {line.human_entry} · 修改后保存生效"
-                if line
-                else "选择 USB 设备，留一个人端入口。"
-            )
+            self._form["subtitle"] = ui.label(subtitle)
             self._icon_button("close", self._close_editor, "关闭对话框")
         with ui.element("div").classes("dialog-body"):
             error_box = ui.element("div").classes("notice error").style("display:none")
@@ -688,6 +731,30 @@ class Panel:
             self._form["error_box"] = error_box
             self._form["error_title"] = error_title
             self._form["error_message"] = error_message
+            if creating:
+                hint_box = ui.element("section").classes("notice")
+                if choices.hint is None:
+                    hint_box.style("display:none")
+                with hint_box:
+                    hint_title = ui.label(
+                        choices.hint.title if choices.hint is not None else ""
+                    ).classes("notice-title")
+                    hint_message = ui.label(
+                        choices.hint.message if choices.hint is not None else ""
+                    )
+                    action_label = (
+                        choices.hint.action_label
+                        if choices.hint is not None and choices.hint.action_label
+                        else "重新扫描设备"
+                    )
+                    with ui.element("div").classes("notice-actions"):
+                        ui.button(
+                            action_label,
+                            on_click=self._rescan_create_devices,
+                        ).props("no-caps unelevated")
+                self._form["device_hint_box"] = hint_box
+                self._form["device_hint_title"] = hint_title
+                self._form["device_hint_message"] = hint_message
             self._form["name"] = ui.input(
                 "线路名称",
                 value=name_value,
@@ -708,23 +775,42 @@ class Panel:
                     max=65535,
                     format="%.0f",
                 ).props("outlined")
-                device_options, default_device = self._device_options(line)
+                device_options = choices.options or {"": "没有可用设备"}
                 self._form["device"] = (
                     ui.select(
                         options=device_options,
-                        value=default_device,
+                        value=choices.default or "",
                         label="USB 设备",
                     )
                     .props("outlined")
                     .classes("w-full")
                 )
-                if line is not None:
+                if line is not None or not choices.options:
                     self._form["device"].disable()
-            ui.label(
-                "此线路的设备绑定保持不变。"
-                if line
-                else "已被其他线路使用的设备不可重复选择。"
-            ).classes("tiny muted")
+            if line is not None:
+                device_help = "此线路的设备绑定保持不变。"
+            elif choices.hint is not None:
+                device_help = (
+                    "没有可选设备时无法创建线路。COM 路径会变，请看 USB 身份。"
+                )
+            else:
+                device_help = (
+                    "选项同时给出当前 COM 路径和稳定 USB 身份（VID:PID、序列号）。"
+                    "已被其他线路使用的设备不可重复选择。"
+                )
+            self._form["device_help"] = ui.label(device_help).classes("tiny muted")
+            if creating:
+                rescan_quiet = (
+                    ui.button(
+                        "重新扫描设备",
+                        on_click=self._rescan_create_devices,
+                    )
+                    .props("flat no-caps")
+                    .classes("quiet link-button")
+                )
+                if choices.hint is not None:
+                    rescan_quiet.style("display:none")
+                self._form["device_rescan_quiet"] = rescan_quiet
             ui.label("串口参数").classes("form-section")
             with ui.element("div").style(
                 "display:grid;grid-template-columns:1fr 1fr;gap:14px"
@@ -741,7 +827,7 @@ class Panel:
                 )
                 self._form["flow"] = ui.select(
                     options=dict(FLOW_LABELS),
-                    value=params.flow_control if params else "none",
+                    value=flow_value,
                     label="流控",
                 ).props("outlined")
             with ui.element("div").style(
@@ -749,24 +835,24 @@ class Panel:
             ):
                 self._form["bits"] = ui.select(
                     options={str(n): str(n) for n in ALLOWED_DATA_BITS},
-                    value=str(params.data_bits if params else 8),
+                    value=bits_value,
                     label="数据位",
                 ).props("outlined")
                 self._form["parity"] = ui.select(
                     options=PARITY_LABELS,
-                    value=params.parity if params else "N",
+                    value=parity_value,
                     label="校验",
                 ).props("outlined")
                 self._form["stop"] = ui.select(
                     options={str(n): str(n) for n in ALLOWED_STOP_BITS},
-                    value=str(params.stop_bits if params else 1),
+                    value=stop_value,
                     label="停止位",
                 ).props("outlined")
             self._form["preview"] = ui.label("").classes("settings-preview")
             ui.label("Agent 文本").classes("form-section")
             self._form["decode"] = ui.select(
                 options=CHARSET_LABELS,
-                value=line.decode if line else "gbk",
+                value=decode_value,
                 label="Agent 字符集",
             ).props("outlined")
             ui.label(
@@ -784,6 +870,8 @@ class Panel:
                 .props("no-caps unelevated")
                 .classes("primary")
             )
+            if creating and not choices.options:
+                save.disable()
             self._form["save"] = save
         for key in (
             "name",
@@ -817,6 +905,50 @@ class Panel:
         )
         if self._form["save"] is not None:
             self._form["save"].set_text(impact.submit_label)
+
+    def _rescan_create_devices(self) -> None:
+        """弹窗内重新读取现场 USB 设备，不重建已填表单。"""
+        used = {item.human_entry for item in self._hub.list_lines()}
+        draft = self._read_draft(None)
+        if draft is None:
+            draft = default_create_draft(suggest_port(used))
+        assigned = {item.device for item in self._hub.list_lines()}
+        result = apply_device_rescan(self._list_paths(), assigned, draft)
+        self._apply_create_device_rescan(result)
+        if result.found:
+            self._refresh_impact(None)
+
+    def _apply_create_device_rescan(self, result: RescanResult) -> None:
+        """把扫描结果写到设备下拉和提示，保留名称、端口和串口参数。"""
+        options = result.choices.options or {"": "没有可用设备"}
+        value = result.device_key if result.found else ""
+        device = self._form["device"]
+        device.set_options(options, value=value)
+        save = self._form.get("save")
+        if result.found:
+            device.enable()
+            if save is not None:
+                save.enable()
+            self._form["device_hint_box"].style("display:none")
+            self._form["device_rescan_quiet"].style("display:inline-flex")
+            self._form["device_help"].set_text(
+                "选项同时给出当前 COM 路径和稳定 USB 身份（VID:PID、序列号）。"
+                "已被其他线路使用的设备不可重复选择。"
+            )
+            self._form["subtitle"].set_text("选择 USB 设备，留一个人端入口。")
+            return
+        device.disable()
+        if save is not None:
+            save.disable()
+        if result.notice is not None:
+            self._form["device_hint_title"].set_text(result.notice.title)
+            self._form["device_hint_message"].set_text(result.notice.message)
+        self._form["device_hint_box"].style("display:block")
+        self._form["device_rescan_quiet"].style("display:none")
+        self._form["device_help"].set_text(
+            "没有可选设备时无法创建线路。COM 路径会变，请看 USB 身份。"
+        )
+        self._form["subtitle"].set_text("先接入可用的 USB 转接器，再创建线路。")
 
     def _read_draft(self, line: LineStatus | None) -> Draft | None:
         """从对话框控件读出一份草稿；尚未画完则空。"""
@@ -891,8 +1023,12 @@ class Panel:
                 self._notice = {
                     "entry": draft.port,
                     "title": "线路已创建",
-                    "message": "人端入口已开始监听。可使用上方地址与线路说明接入。",
+                    "message": (
+                        "人端入口已开始监听。请复制人端地址给 Telnet，"
+                        "或复制 Agent/MCP 说明交给 Agent。"
+                    ),
                     "reconnect": False,
+                    "copy_connection": True,
                 }
             else:
                 old_port = line.human_entry
@@ -929,12 +1065,14 @@ class Panel:
                     "reconnect": port_changed,
                 }
         except HumanEntryOccupied as exc:
+            if line is None:
+                error = create_port_conflict_error(exc.human_entry)
+                self._show_form_error(error.title, error.message)
+                return
             kept = (
                 f"原线路 {line.human_entry} · {line.serial_params.baudrate} · "
                 f"{serial_format(line.serial_params)} · {charset_label(line.decode)} "
                 "保持不变，现有连接保留。请更换端口后再保存。"
-                if line is not None
-                else "线路尚未创建，设备尚未被这条线路占用。请更换端口后再试。"
             )
             self._show_form_error(str(exc), kept)
             return
@@ -956,31 +1094,18 @@ class Panel:
         self._editor.close()
         self._set_dialog_open(False)
 
-    def _device_options(
-        self, line: LineStatus | None
-    ) -> tuple[dict[str, str], str | None]:
+    def _device_options(self, line: LineStatus | None) -> DeviceChoice:
         """创建设备下拉：可用的在场设备；编辑时只展示当前绑定。"""
         paths = self._list_paths()
-        assigned = {
-            identity_key(item.device): item.human_entry
-            for item in self._hub.list_lines()
-        }
-        options: dict[str, str] = {}
-        if line is not None:
-            key = identity_key(line.device)
-            path = paths.get(line.device, "未接入")
-            options[key] = f"{path} · USB 串口"
-            return options, key
-        default = None
-        for identity, path in paths.items():
-            key = identity_key(identity)
-            owner = assigned.get(key)
-            if owner is not None:
-                continue
-            options[key] = f"{path} · USB 串口 · 可用"
-            if default is None:
-                default = key
-        return options, default
+        assigned = {item.device for item in self._hub.list_lines()}
+        if line is None:
+            return create_device_choices(paths, assigned)
+        return create_device_choices(
+            paths,
+            assigned,
+            current=line.device,
+            current_path=paths.get(line.device, ""),
+        )
 
     def _present_keys(self) -> set[str]:
         """此刻插着的 USB 身份键。"""
