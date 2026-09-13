@@ -10,12 +10,16 @@ from comtee.line_edit import (
     Draft,
     LineView,
     agent_share_text,
+    collapsed_rail,
+    detail_layers,
     failure_notices,
     impact_text,
     line_health,
     recovery_notice,
+    remove_impact,
     serial_format,
     split_status,
+    tray_menu,
     validate_draft,
 )
 
@@ -55,8 +59,77 @@ def test_改入口与改参数的影响说明可区分() -> None:
     decode_only = impact_text(current, _draft(), creating=False)
     assert "入口" in port_change.message
     assert port_change.warning is True
+    assert port_change.reopens_serial is False
     assert "不重新打开串口" in decode_only.message
     assert decode_only.warning is False
+    assert decode_only.reopens_serial is False
+
+
+def test_只改名称或字符集不重新占口改参数会短暂中断() -> None:
+    """名称和 Agent 字符集是元数据；波特率等才会重新占口。"""
+    current = _view()
+    name_only = impact_text(current, _draft(name="实验台"), creating=False)
+    charset_only = impact_text(current, _draft(decode="utf-8"), creating=False)
+    baud = impact_text(current, _draft(baud=115200), creating=False)
+    waiting = impact_text(
+        _view(hold=LineHold.WAITING),
+        _draft(baud=115200),
+        creating=False,
+    )
+    assert name_only.reopens_serial is False
+    assert charset_only.reopens_serial is False
+    assert baud.reopens_serial is True
+    assert "短暂中断" in baud.message
+    assert waiting.reopens_serial is False
+    assert "插回" in waiting.message
+
+
+def test_折叠线路栏仍保留名称端口和状态() -> None:
+    """折叠后至少还能认出线路、入口和占口状态。"""
+    item = collapsed_rail(_view())
+    unnamed = collapsed_rail(_view(name=""))
+    waiting = collapsed_rail(_view(hold=LineHold.WAITING))
+    assert item.name == "AC 控制台"
+    assert item.port == 2222
+    assert item.status == "占口"
+    assert unnamed.name == "未命名线路"
+    assert waiting.status == "等待设备"
+
+
+def test_详情优先名称端口状态其次才是串口参数() -> None:
+    """USB 身份可查看，但不能压过入口和占口。"""
+    layers = detail_layers(_view())
+    assert layers.primary.name == "AC 控制台"
+    assert layers.primary.port == 2222
+    assert layers.primary.status == "占口"
+    assert layers.secondary.baud == "9600"
+    assert layers.secondary.serial_format == "8N1"
+    assert layers.secondary.charset == "GBK"
+    assert "0403:6001" in layers.device_key
+    assert layers.device_path == "COM6"
+    primary = {layers.primary.name, str(layers.primary.port), layers.primary.status}
+    assert layers.device_key not in primary
+    assert layers.device_path not in primary
+
+
+def test_拆线路说明会停止监听并释放占口() -> None:
+    """拆掉前必须说清会停听、放口，而不是只说关闭。"""
+    text = remove_impact(_view())
+    assert "2222" in text.title
+    assert "停止" in text.message
+    assert "监听" in text.message
+    assert "释放" in text.message
+    assert "占口" in text.message
+    assert "2 个已连接人端将断开" in text.message
+    assert "Agent" in text.message
+    assert "保留线路" in text.keep_hint
+
+
+def test_托盘菜单区分打开面板和退出串通() -> None:
+    """关窗只藏面板；退出串通才放口。"""
+    menu = tray_menu()
+    assert menu.open_panel == "打开面板"
+    assert menu.quit == "退出串通"
 
 
 def test_人端监听和设备占口分开呈现() -> None:
@@ -151,17 +224,23 @@ def test_Agent说明指名入口并禁止直接开COM() -> None:
     assert "不要直接打开 COM" in text
 
 
-def _draft(*, port: int = 2222, baud: int = 9600) -> Draft:
+def _draft(
+    *,
+    name: str = "AC 控制台",
+    port: int = 2222,
+    baud: int = 9600,
+    decode: str = "gbk",
+) -> Draft:
     """一份合法草稿，测试里只改要看的字段。"""
     return Draft(
-        name="AC 控制台",
+        name=name,
         port=port,
         baud=baud,
         data_bits=8,
         parity="N",
         stop_bits=1,
         flow_control="none",
-        decode="gbk",
+        decode=decode,
         device_key="0403:6001|FT123",
     )
 

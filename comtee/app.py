@@ -10,6 +10,7 @@ from nicegui import app, native, ui
 from comtee.agent import AgentPipe
 from comtee.autostart import PreferredAutoStart, windows_autostart
 from comtee.hub import Comtee, UsbIdentity
+from comtee.line_edit import tray_menu
 from comtee.native_window import install_hide_on_close
 from comtee.panel import build_panel
 from comtee.persist import FileArrangementStore, UserSettings
@@ -75,9 +76,12 @@ def run() -> None:
         image = Image.new("RGB", (64, 64), "#1d4ed8")
         draw = ImageDraw.Draw(image)
         draw.rectangle((10, 18, 54, 46), outline="white", width=4)
+        items = tray_menu()
         menu = pystray.Menu(
-            pystray.MenuItem("打开面板", lambda *_args: show_panel(), default=True),
-            pystray.MenuItem("退出", lambda *_args: quit_app()),
+            pystray.MenuItem(
+                items.open_panel, lambda *_args: show_panel(), default=True
+            ),
+            pystray.MenuItem(items.quit, lambda *_args: quit_app()),
         )
         icon = pystray.Icon("comtee", image, _TITLE, menu)
         tray_holder["icon"] = icon
