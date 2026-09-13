@@ -72,6 +72,62 @@ class Impact:
     message: str
     warning: bool
     submit_label: str
+    reopens_serial: bool = False
+
+
+@dataclass(frozen=True)
+class RailSummary:
+    """折叠左栏后仍要看得见的线路身份。"""
+
+    name: str
+    port: int
+    status: str
+
+
+@dataclass(frozen=True)
+class DetailPrimary:
+    """详情第一层：线路名称、人端入口和占口状态。"""
+
+    name: str
+    port: int
+    status: str
+
+
+@dataclass(frozen=True)
+class DetailSecondary:
+    """详情第二层：完整串口参数和 Agent 字符集。"""
+
+    baud: str
+    serial_format: str
+    charset: str
+    flow: str
+
+
+@dataclass(frozen=True)
+class DetailLayers:
+    """详情分层：身份与占口在上，串口参数在下，USB 身份另列。"""
+
+    primary: DetailPrimary
+    secondary: DetailSecondary
+    device_path: str
+    device_key: str
+
+
+@dataclass(frozen=True)
+class RemoveImpact:
+    """拆线路前要说清的后果。"""
+
+    title: str
+    message: str
+    keep_hint: str
+
+
+@dataclass(frozen=True)
+class TrayMenu:
+    """托盘两项：打开面板，或退出串通。"""
+
+    open_panel: str
+    quit: str
 
 
 @dataclass(frozen=True)
@@ -145,6 +201,63 @@ def draft_serial_params(draft: Draft) -> SerialParams:
 def charset_label(decode: str) -> str:
     """Agent 字符集的展示名。"""
     return CHARSET_LABELS.get(decode, decode.upper())
+
+
+def line_display_name(name: str) -> str:
+    """没有名称时仍给一条可辨认的线路标签。"""
+    cleaned = name.strip()
+    return cleaned if cleaned else "未命名线路"
+
+
+def collapsed_rail(view: LineView) -> RailSummary:
+    """折叠后至少保留线路名称、人端入口和状态。"""
+    return RailSummary(
+        name=line_display_name(view.name),
+        port=view.human_entry,
+        status=line_health(view).badge,
+    )
+
+
+def detail_layers(view: LineView) -> DetailLayers:
+    """详情先放名称、入口和占口，再放串口参数；USB 身份不进第一层。"""
+    params = view.serial_params
+    return DetailLayers(
+        primary=DetailPrimary(
+            name=line_display_name(view.name),
+            port=view.human_entry,
+            status=line_health(view).badge,
+        ),
+        secondary=DetailSecondary(
+            baud=str(params.baudrate),
+            serial_format=serial_format(params),
+            charset=charset_label(view.decode),
+            flow=FLOW_LABELS.get(params.flow_control, params.flow_control),
+        ),
+        device_path=view.device_path,
+        device_key=view.device_key,
+    )
+
+
+def remove_impact(view: LineView) -> RemoveImpact:
+    """拆线路会停止该入口监听并释放设备占口。"""
+    extras = ""
+    if view.human_clients:
+        extras += f"{view.human_clients} 个已连接人端将断开。"
+    if view.agent_connected:
+        extras += "Agent 将无法继续访问这条线路。"
+    return RemoveImpact(
+        title=f"拆掉 {view.human_entry} 线路？",
+        message=(
+            f"确认后会停止人端入口 {view.human_entry} 的监听，"
+            f"并释放这台设备的占口。{extras}"
+        ),
+        keep_hint="如果只是设备暂时拔掉，保留线路即可，插回后会自动恢复。",
+    )
+
+
+def tray_menu() -> TrayMenu:
+    """关窗只藏面板；退出串通才释放全部占口。"""
+    return TrayMenu(open_panel="打开面板", quit="退出串通")
 
 
 def format_preview(draft: Draft) -> str:
@@ -223,17 +336,19 @@ def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impac
             f"保存后切换人端入口。{clients}Agent 后续需指名新端口。新端口不可用时，原线路与配置保留。",
             True,
             "保存并切换入口",
+            False,
         )
     if params_change:
         if view.hold == LineHold.WAITING:
             message = "设备未接入：先保存设置，设备插回时按新参数占口。"
-        else:
-            message = "串口参数有变化：保存时会重新占串口，数据传输会短暂中断。"
-        return Impact(message, view.hold == LineHold.HELD, "保存设置")
+            return Impact(message, False, "保存设置", False)
+        message = "串口参数有变化：保存时会重新占串口，数据传输会短暂中断。"
+        return Impact(message, True, "保存设置", True)
     return Impact(
         "仅修改名称或 Agent 字符集时，不重新打开串口，已有连接保持。",
         False,
         "保存设置",
+        False,
     )
 
 

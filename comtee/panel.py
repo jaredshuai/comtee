@@ -29,6 +29,8 @@ from comtee.line_edit import (
     LineView,
     agent_share_text,
     charset_label,
+    collapsed_rail,
+    detail_layers,
     draft_serial_params,
     failure_notices,
     format_bytes,
@@ -36,10 +38,12 @@ from comtee.line_edit import (
     format_preview,
     identity_key,
     impact_text,
+    line_display_name,
     line_health,
     listen_address,
     parse_identity_key,
     recovery_notice,
+    remove_impact,
     serial_format,
     status_to_view,
     suggest_port,
@@ -220,7 +224,7 @@ class Panel:
             ).classes("primary")
 
     def _render_rail(self, lines: list[LineStatus], selected: LineStatus) -> None:
-        """左侧线路列表；折叠后仍显示端口和状态点。"""
+        """左侧线路列表；折叠后仍显示名称、入口和状态。"""
         with ui.element("aside").classes("rail"):
             with ui.element("div").classes("railhead"):
                 count = len(lines)
@@ -237,10 +241,11 @@ class Panel:
                 self._rail_item(line, line.human_entry == selected.human_entry)
 
     def _rail_item(self, line: LineStatus, active: bool) -> None:
-        """一条线路的列表项：端口最醒目。"""
+        """一条线路的列表项；折叠后仍保留名称、入口和状态。"""
         view = status_to_view(line, self._path_of(line))
         health = line_health(view)
-        port = line.human_entry
+        summary = collapsed_rail(view)
+        port = summary.port
 
         def choose() -> None:
             """切换详情，不丢掉折叠状态。"""
@@ -256,13 +261,13 @@ class Panel:
             ui.button(on_click=choose, color=None)
             .props("flat no-caps unelevated")
             .classes("railitem" + (" active" if active else ""))
-            .tooltip(f"{port} · {line.name or '未命名线路'} · {health.badge}")
+            .tooltip(f"{summary.port} · {summary.name} · {summary.status}")
         )
         with btn, ui.element("div").classes("rail-line"):
             with ui.element("div").classes("rail-title"):
-                ui.label(str(port)).classes("mono")
-                ui.label(line.name or "未命名线路").classes("rail-alias")
-            state = ui.label(health.badge).classes(
+                port_label = ui.label(str(summary.port)).classes("mono rail-port")
+                name = ui.label(summary.name).classes("rail-alias")
+            state = ui.label(summary.status).classes(
                 f"rail-state rail-state-text {health.badge_class}"
             )
             device = ui.label(health.device).classes(
@@ -272,6 +277,8 @@ class Panel:
                 f"rail-meta rail-human {health.human_class}"
             )
             clients = ui.label(health.clients).classes("rail-meta rail-clients")
+            self._labels[f"rail-name-{port}"] = name
+            self._labels[f"rail-port-{port}"] = port_label
             self._labels[f"rail-state-{port}"] = state
             self._labels[f"rail-device-{port}"] = device
             self._labels[f"rail-human-{port}"] = human
@@ -284,24 +291,22 @@ class Panel:
         self._render_content()
 
     def _fill_detail(self, line: LineStatus) -> None:
-        """右侧详情：端口、分离的链路状态、完整串口格式。"""
+        """右侧详情：先名称、入口和占口，再完整串口参数。"""
         view = status_to_view(line, self._path_of(line))
         health = line_health(view)
+        layers = detail_layers(view)
         params = line.serial_params
         missing = line.hold == LineHold.WAITING
         with ui.element("div").classes("detail-top"):
-            with ui.element("div"):
+            with ui.element("div").classes("identity"):
+                self._labels["alias"] = ui.label(layers.primary.name).classes(
+                    "line-name"
+                )
                 ui.label("人端入口").classes("eyebrow")
-                with ui.element("div").classes("port mono"):
-                    self._labels["port"] = ui.label(str(line.human_entry)).style(
-                        "display:inline"
-                    )
-                    self._labels["alias"] = (
-                        ui.label(line.name or "")
-                        .classes("line-alias")
-                        .style("display:inline")
-                    )
-            self._labels["badge"] = ui.label(health.badge).classes(
+                self._labels["port"] = ui.label(str(layers.primary.port)).classes(
+                    "port mono"
+                )
+            self._labels["badge"] = ui.label(layers.primary.status).classes(
                 f"badge {health.badge_class}"
             )
         with ui.element("div").classes("endpoint"):
@@ -344,16 +349,16 @@ class Panel:
                 color=None,
             ).props("flat no-caps").classes("quiet link-button")
         with ui.element("div").classes("param-grid"):
-            self._param("波特率", str(params.baudrate), "波特 / 秒", "baud")
+            self._param("波特率", layers.secondary.baud, "波特 / 秒", "baud")
             self._param(
                 "串口格式",
-                serial_format(params),
+                layers.secondary.serial_format,
                 f"{params.data_bits} 数据位 · {PARITY_LABELS.get(params.parity, params.parity)} · {params.stop_bits} 停止位",
                 "format",
             )
             self._param(
                 "Agent 字符集",
-                charset_label(line.decode),
+                layers.secondary.charset,
                 "文本接收与发送",
                 "charset",
             )
@@ -470,7 +475,7 @@ class Panel:
         params = selected.serial_params
         missing = selected.hold == LineHold.WAITING
         self._set("port", str(selected.human_entry))
-        self._set("alias", selected.name or "")
+        self._set("alias", line_display_name(selected.name))
         if "badge" in self._labels:
             self._labels["badge"].set_text(health.badge)
             self._labels["badge"].classes(replace=f"badge {health.badge_class}".strip())
@@ -523,8 +528,12 @@ class Panel:
             else "尚无设备输出；没有输出本身不能证明参数错误。",
         )
         for line in lines:
-            item = line_health(status_to_view(line, self._path_of(line)))
+            view = status_to_view(line, self._path_of(line))
+            item = line_health(view)
+            summary = collapsed_rail(view)
             port = line.human_entry
+            self._set(f"rail-name-{port}", summary.name)
+            self._set(f"rail-port-{port}", str(summary.port))
             self._set(f"rail-state-{port}", item.badge)
             if f"rail-state-{port}" in self._labels:
                 self._labels[f"rail-state-{port}"].classes(
@@ -763,8 +772,8 @@ class Panel:
             ui.label(
                 "用于 Agent 接收文本的解码，以及发送文本转字节。Moba 等 Telnet 客户端的字符设置需单独配置。"
             ).classes("tiny muted")
-            self._form["impact"] = ui.label("").classes("impact")
             self._form["save"] = None
+        self._form["impact"] = ui.label("").classes("impact impact-bar")
         with ui.element("div").classes("dialog-footer"):
             ui.button("取消", on_click=self._close_editor).props("flat no-caps")
             save = (
@@ -802,8 +811,9 @@ class Panel:
         self._form["preview"].set_text(format_preview(draft))
         self._form["impact"].set_text(impact.message)
         self._form["impact"].classes(
-            replace="impact warning",
-            add="impact warning" if impact.warning else "impact",
+            replace=(
+                "impact impact-bar warning" if impact.warning else "impact impact-bar"
+            ),
         )
         if self._form["save"] is not None:
             self._form["save"].set_text(impact.submit_label)
@@ -1013,21 +1023,13 @@ class Panel:
             return
         self._set_dialog_open(True)
         self._confirm.clear()
+        impact = remove_impact(status_to_view(line, self._path_of(line)))
         with self._confirm, ui.card().classes("dialog-card small"):
             with ui.element("div").classes("dialoghead"):
-                ui.html(f"<h2>拆掉 {line.human_entry} 线路？</h2>", sanitize=False)
+                ui.html(f"<h2>{impact.title}</h2>", sanitize=False)
             with ui.element("div").classes("dialog-body"):
-                who = ""
-                if line.human_clients:
-                    who += f"{line.human_clients} 个已连接人端将断开。"
-                if line.agent_connected:
-                    who += "Agent 将无法继续访问这条线路。"
-                ui.label(
-                    f"设备会被释放，人端入口 {line.human_entry} 会关闭。{who}"
-                ).classes("share-help")
-                ui.label(
-                    "如果只是设备暂时拔掉，保留线路即可，插回后会自动恢复。"
-                ).classes("tiny muted")
+                ui.label(impact.message).classes("share-help")
+                ui.label(impact.keep_hint).classes("tiny muted")
             with ui.element("div").classes("dialog-footer"):
                 ui.button("保留线路", on_click=self._close_confirm).props(
                     "flat no-caps"

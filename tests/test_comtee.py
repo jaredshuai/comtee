@@ -45,6 +45,7 @@ class FakeSerial:
         self._paths: dict[UsbIdentity, str] = {}
         self._occupied_path: dict[UsbIdentity, str] = {}
         self._on_change: Callable[[], None] | None = None
+        self._fail_occupy = 0
         self.occupy_calls = 0
 
     def plug(self, device: UsbIdentity, path: str = "COM6") -> None:
@@ -84,6 +85,10 @@ class FakeSerial:
         """模拟设备已被别人占用、打不开。"""
         self._busy.add(device)
 
+    def fail_next_occupy(self, times: int = 1) -> None:
+        """让接下来若干次占口失败，用于测参数回滚后仍恢复旧占口。"""
+        self._fail_occupy = times
+
     def clear_busy(self, device: UsbIdentity) -> None:
         """模拟别人放口；设备仍在场。"""
         self._busy.discard(device)
@@ -91,6 +96,11 @@ class FakeSerial:
     def occupy(self, device: UsbIdentity, params: SerialParams) -> LineHold:
         """按身份占口；不在则等待，被占则冲突。"""
         self.occupy_calls += 1
+        if self._fail_occupy > 0:
+            self._fail_occupy -= 1
+            if device not in self._present:
+                return LineHold.WAITING
+            return LineHold.CONFLICT
         if device not in self._present:
             return LineHold.WAITING
         if device in self._busy:
@@ -954,6 +964,29 @@ def test_等待设备时改参数先保存待接入后再占口() -> None:
     assert held.hold == LineHold.HELD
     assert serial.held_params(device) == SerialParams(baudrate=115200)
     assert serial.written(device) == b""
+
+
+def test_参数应用失败时旧监听和客户端关系保持() -> None:
+    """新参数打不开时，旧占口、旧监听和已挂客户端都必须留下。"""
+    serial = FakeSerial()
+    device = _plugged(serial, "FT123")
+    human = FakeHuman()
+    hub = Comtee(serial, MemoryStore(), human=human)
+    hub.create_line(2222, device, serial_params=SerialParams(baudrate=19200))
+    client = hub.attach_client(2222)
+    serial.fail_next_occupy()
+
+    with pytest.raises(SerialApplyFailed):
+        hub.change_line(2222, serial_params=SerialParams(baudrate=115200))
+
+    [line] = hub.list_lines()
+    assert line.serial_params == SerialParams(baudrate=19200)
+    assert line.hold == LineHold.HELD
+    assert line.human_listening is True
+    assert 2222 in human.listening
+    assert client.write(b"keep") is True
+    assert serial.written(device) == b"keep"
+    assert serial.held_params(device) == SerialParams(baudrate=19200)
 
 
 def test_参数应用失败则保留原串口配置() -> None:
