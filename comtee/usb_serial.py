@@ -1,7 +1,7 @@
-"""按 USB 身份枚举并打开串口；COM 路径只是此刻打开它的路。
+"""按稳定设备身份枚举并打开串口；COM 路径只是此刻打开它的路。
 
 本机核对（不进门禁）：插已知 FTDI，usb_identity_paths 应出现其 VID:PID 与序列号；
-用其他程序占住该 COM 后再 occupy，应为占用冲突；蓝牙虚拟口不得出现在列表里。
+用其他程序占住该 COM 后再 occupy，应为占用冲突；蓝牙虚拟口按 BTHENUM 身份纳入列表。
 """
 
 import threading
@@ -9,7 +9,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
-from comtee.hub import LineHold, SerialParams, UsbIdentity
+from comtee.hub import (
+    BluetoothIdentity,
+    LineHold,
+    SerialIdentity,
+    SerialParams,
+    UsbIdentity,
+)
 
 
 @dataclass(frozen=True)
@@ -24,19 +30,63 @@ class PortSnapshot:
     description: str
 
 
-def usb_identity_paths(ports: Iterable[PortSnapshot]) -> dict[UsbIdentity, str]:
-    """列出 USB 串口身份到此刻 COM 路径；丢掉蓝牙和非 USB。"""
-    found: dict[UsbIdentity, str] = {}
+@dataclass(frozen=True)
+class SerialScan:
+    """一次串口枚举的结果：可用身份及其余被忽略的串口数量。"""
+
+    paths: dict[SerialIdentity, str]
+    usb: int = 0
+    bluetooth: int = 0
+    unidentified: int = 0
+
+    @property
+    def total(self) -> int:
+        """本次枚举看到的全部串口数量。"""
+        return self.usb + self.bluetooth + self.unidentified
+
+
+def scan_serial_ports(ports: Iterable[PortSnapshot]) -> SerialScan:
+    """把一次枚举分成可绑定 USB、可绑定蓝牙和缺少身份的口。"""
+    paths: dict[SerialIdentity, str] = {}
+    usb = 0
+    bluetooth = 0
+    unidentified = 0
     for port in ports:
         identity = _usb_identity(port)
-        if identity is None:
+        if identity is not None:
+            paths[identity] = port.path
+            usb += 1
             continue
-        found[identity] = port.path
-    return found
+        identity = _bluetooth_identity(port)
+        if identity is not None:
+            paths[identity] = port.path
+            bluetooth += 1
+        else:
+            unidentified += 1
+    return SerialScan(
+        paths=paths,
+        usb=usb,
+        bluetooth=bluetooth,
+        unidentified=unidentified,
+    )
+
+
+def serial_identity_paths(ports: Iterable[PortSnapshot]) -> dict[SerialIdentity, str]:
+    """列出所有可支持串口身份到此刻 COM 路径。"""
+    return scan_serial_ports(ports).paths
+
+
+def usb_identity_paths(ports: Iterable[PortSnapshot]) -> dict[UsbIdentity, str]:
+    """列出 USB 串口身份到此刻 COM 路径；保留旧的 USB 专用查询语义。"""
+    return {
+        identity: path
+        for identity, path in scan_serial_ports(ports).paths.items()
+        if isinstance(identity, UsbIdentity)
+    }
 
 
 def _usb_identity(port: PortSnapshot) -> UsbIdentity | None:
-    """能钉死的 USB 身份；蓝牙虚拟口和缺身份的口都丢掉。"""
+    """能钉死的 USB 身份；蓝牙虚拟口交给蓝牙身份处理。"""
     if _is_bluetooth(port):
         return None
     if port.vid is None or port.pid is None:
@@ -44,6 +94,19 @@ def _usb_identity(port: PortSnapshot) -> UsbIdentity | None:
     if not port.serial:
         return None
     return UsbIdentity(vid=port.vid, pid=port.pid, serial=port.serial)
+
+
+def _bluetooth_identity(port: PortSnapshot) -> BluetoothIdentity | None:
+    """从 BTHENUM 硬件标识取得可持久化的出站蓝牙身份；跳过本机入站口。"""
+    normalized = port.hwid.strip().upper()
+    if "BTHENUM" not in normalized or _is_incoming_bluetooth(normalized):
+        return None
+    return BluetoothIdentity(hwid=normalized)
+
+
+def _is_incoming_bluetooth(hwid: str) -> bool:
+    """Windows 本机入站 SPP 口的远端地址段为全零，不能用于主动连接。"""
+    return "&000000000000_" in hwid.strip().upper()
 
 
 def _is_bluetooth(port: PortSnapshot) -> bool:
@@ -74,7 +137,7 @@ class OpenedPort(Protocol):
 
 
 class UsbSerial:
-    """串口适配器：按 USB 身份占口，COM 号只当路径。"""
+    """串口适配器：按 USB 或蓝牙身份占口，COM 号只当路径。"""
 
     def __init__(
         self,
@@ -84,15 +147,15 @@ class UsbSerial:
         """注入枚举与打开，便于测试不碰真 COM。"""
         self._list_ports = list_ports
         self._open_port = open_port
-        self._held: dict[UsbIdentity, OpenedPort] = {}
-        self._listeners: dict[UsbIdentity, Callable[[bytes], None]] = {}
-        self._readers: dict[UsbIdentity, threading.Thread] = {}
-        self._stops: dict[UsbIdentity, threading.Event] = {}
+        self._held: dict[SerialIdentity, OpenedPort] = {}
+        self._listeners: dict[SerialIdentity, Callable[[bytes], None]] = {}
+        self._readers: dict[SerialIdentity, threading.Thread] = {}
+        self._stops: dict[SerialIdentity, threading.Event] = {}
         self._on_change: Callable[[], None] | None = None
 
-    def occupy(self, device: UsbIdentity, params: SerialParams) -> LineHold:
+    def occupy(self, device: SerialIdentity, params: SerialParams) -> LineHold:
         """按身份打开此刻路径；不在则等待，打不开则占用冲突。"""
-        path = usb_identity_paths(self._list_ports()).get(device)
+        path = serial_identity_paths(self._list_ports()).get(device)
         if path is None:
             return LineHold.WAITING
         try:
@@ -103,7 +166,7 @@ class UsbSerial:
         self._ensure_reader(device)
         return LineHold.HELD
 
-    def release(self, device: UsbIdentity) -> None:
+    def release(self, device: SerialIdentity) -> None:
         """放掉该设备并停掉读线程。"""
         stop = self._stops.pop(device, None)
         if stop is not None:
@@ -116,12 +179,12 @@ class UsbSerial:
         if handle is not None:
             handle.close()
 
-    def listen(self, device: UsbIdentity, on_bytes: Callable[[bytes], None]) -> None:
+    def listen(self, device: SerialIdentity, on_bytes: Callable[[bytes], None]) -> None:
         """登记设备字节回调，并在已占口时开始泵字节。"""
         self._listeners[device] = on_bytes
         self._ensure_reader(device)
 
-    def _ensure_reader(self, device: UsbIdentity) -> None:
+    def _ensure_reader(self, device: SerialIdentity) -> None:
         """占口且有回调时启动读线程；已死或正是当前这根则再拉起来。"""
         if device not in self._held or device not in self._listeners:
             return
@@ -142,12 +205,12 @@ class UsbSerial:
         self._readers[device] = thread
         thread.start()
 
-    def _forget_reader(self, device: UsbIdentity, thread: threading.Thread) -> None:
+    def _forget_reader(self, device: SerialIdentity, thread: threading.Thread) -> None:
         """读线程退出前先把自己从登记拿掉，好让对照现场再拉一根。"""
         if self._readers.get(device) is thread:
             del self._readers[device]
 
-    def _read_loop(self, device: UsbIdentity, stop: threading.Event) -> None:
+    def _read_loop(self, device: SerialIdentity, stop: threading.Event) -> None:
         """循环读取真串口，把设备字节送到登记的回调。"""
         while not stop.is_set():
             handle = self._held.get(device)
@@ -167,17 +230,21 @@ class UsbSerial:
             elif stop.wait(0.05):
                 return
 
-    def write(self, device: UsbIdentity, data: bytes) -> None:
+    def write(self, device: SerialIdentity, data: bytes) -> None:
         """把客户端写下的原字节打进已占的口。"""
         self._held[device].write(data)
 
-    def present(self) -> frozenset[UsbIdentity]:
-        """此刻现场插着的 USB 身份。"""
+    def present(self) -> frozenset[SerialIdentity]:
+        """此刻现场插着的可支持串口身份。"""
         return frozenset(self.paths())
 
-    def paths(self) -> dict[UsbIdentity, str]:
-        """USB 身份到此刻 COM 路径。"""
-        return usb_identity_paths(self._list_ports())
+    def scan(self) -> SerialScan:
+        """枚举本机串口，并保留蓝牙与无身份口的诊断。"""
+        return scan_serial_ports(self._list_ports())
+
+    def paths(self) -> dict[SerialIdentity, str]:
+        """稳定串口身份到此刻 COM 路径。"""
+        return self.scan().paths
 
     def watch(self, on_change: Callable[[], None]) -> None:
         """插拔变化时由调用方触发对照。"""

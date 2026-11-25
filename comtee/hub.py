@@ -54,6 +54,20 @@ class UsbIdentity:
 
 
 @dataclass(frozen=True)
+class BluetoothIdentity:
+    """用 Windows BTHENUM 硬件标识辨认的一台蓝牙串口设备。"""
+
+    hwid: str
+
+    def __post_init__(self) -> None:
+        """统一去空白并转大写，避免同一蓝牙身份大小写不一致导致失配。"""
+        object.__setattr__(self, "hwid", self.hwid.strip().upper())
+
+
+SerialIdentity = UsbIdentity | BluetoothIdentity
+
+
+@dataclass(frozen=True)
 class SerialParams:
     """占口时用的串口参数，默认 9600 8N1 无流控。"""
 
@@ -69,7 +83,7 @@ class LineStatus:
     """一条线路对外可见的编排与占口状态。"""
 
     human_entry: int
-    device: UsbIdentity
+    device: SerialIdentity
     serial_params: SerialParams
     decode: str
     hold: LineHold
@@ -87,33 +101,33 @@ class LineArrangement:
     """需要写盘并在启动时恢复的线路编排，不含占口结果。"""
 
     human_entry: int
-    device: UsbIdentity
+    device: SerialIdentity
     serial_params: SerialParams
     decode: str
     name: str = ""
 
 
 class SerialPort(Protocol):
-    """按 USB 身份占口、放口的串口适配器。"""
+    """按稳定设备身份占口、放口的串口适配器。"""
 
-    def occupy(self, device: UsbIdentity, params: SerialParams) -> LineHold:
+    def occupy(self, device: SerialIdentity, params: SerialParams) -> LineHold:
         """打开并独占该设备；打不开则占用冲突，不在则等待设备。"""
         ...
 
-    def release(self, device: UsbIdentity) -> None:
+    def release(self, device: SerialIdentity) -> None:
         """放掉该设备。"""
         ...
 
-    def listen(self, device: UsbIdentity, on_bytes: Callable[[bytes], None]) -> None:
+    def listen(self, device: SerialIdentity, on_bytes: Callable[[bytes], None]) -> None:
         """设备上来的原字节回调给串通。"""
         ...
 
-    def write(self, device: UsbIdentity, data: bytes) -> None:
+    def write(self, device: SerialIdentity, data: bytes) -> None:
         """把客户端写下的原字节打进设备。"""
         ...
 
-    def present(self) -> frozenset[UsbIdentity]:
-        """此刻现场插着的 USB 身份。"""
+    def present(self) -> frozenset[SerialIdentity]:
+        """此刻现场插着的可支持串口身份。"""
         ...
 
     def watch(self, on_change: Callable[[], None]) -> None:
@@ -154,7 +168,7 @@ class _Line:
     """一条线路的内部记录。"""
 
     human_entry: int
-    device: UsbIdentity
+    device: SerialIdentity
     serial_params: SerialParams = field(default_factory=SerialParams)
     decode: str = "gbk"
     name: str = ""
@@ -267,7 +281,7 @@ class Comtee:
     def create_line(
         self,
         human_entry: int,
-        device: UsbIdentity,
+        device: SerialIdentity,
         *,
         name: str = "",
         serial_params: SerialParams | None = None,
@@ -323,12 +337,19 @@ class Comtee:
         human_entry: int,
         *,
         new_entry: int | None = None,
+        device: SerialIdentity | None = None,
         name: str | None = None,
         serial_params: SerialParams | None = None,
         decode: str | None = None,
     ) -> None:
-        """改一条线路的入口、名称、串口参数和/或解码。"""
+        """改一条线路的入口、设备、名称、串口参数和/或解码。"""
         line = self._lines[human_entry]
+        device_changed = device is not None and device != line.device
+        if device_changed and any(
+            other is not line and other.device == device
+            for other in self._lines.values()
+        ):
+            raise ArrangementRejected("同一台设备不能分配给两条线路")
         pending_entry: int | None = None
         if new_entry is not None and new_entry != human_entry:
             if new_entry in self._lines:
@@ -337,7 +358,13 @@ class Comtee:
                 raise HumanEntryOccupied(new_entry)
             pending_entry = new_entry
         try:
-            if serial_params is not None and serial_params != line.serial_params:
+            if device_changed:
+                assert device is not None
+                target_params = (
+                    serial_params if serial_params is not None else line.serial_params
+                )
+                self._switch_device(line, device, target_params)
+            elif serial_params is not None and serial_params != line.serial_params:
                 self._apply_serial_params(line, serial_params)
             if decode is not None:
                 line.decode = decode
@@ -430,6 +457,31 @@ class Comtee:
             line.hold = restored
             self._bind_device(line)
             raise SerialApplyFailed()
+        line.serial_params = params
+        line.hold = hold
+        self._bind_device(line)
+
+    def _switch_device(
+        self,
+        line: _Line,
+        new_device: SerialIdentity,
+        params: SerialParams,
+    ) -> None:
+        """改绑设备并占口；新设备冲突时尽量恢复原设备绑定。"""
+        old_device = line.device
+        old_params = line.serial_params
+        old_hold = line.hold
+        if old_hold == LineHold.HELD:
+            self._serial.release(old_device)
+        hold = self._serial.occupy(new_device, params)
+        if hold == LineHold.CONFLICT:
+            if old_hold == LineHold.HELD:
+                line.hold = self._serial.occupy(old_device, old_params)
+                self._bind_device(line)
+            else:
+                line.hold = old_hold
+            raise SerialApplyFailed("新设备正被其他程序占用，原设备绑定已保留")
+        line.device = new_device
         line.serial_params = params
         line.hold = hold
         self._bind_device(line)

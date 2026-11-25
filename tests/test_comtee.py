@@ -7,11 +7,13 @@ import pytest
 from comtee import (
     AgentForbidden,
     ArrangementRejected,
+    BluetoothIdentity,
     Comtee,
     HumanEntryOccupied,
     LineArrangement,
     LineHold,
     SerialApplyFailed,
+    SerialIdentity,
     SerialParams,
     UsbIdentity,
 )
@@ -36,31 +38,31 @@ class FakeSerial:
     """假串口：按 USB 身份插拔、占口与放口。"""
 
     def __init__(self) -> None:
-        self._present: set[UsbIdentity] = set()
-        self._busy: set[UsbIdentity] = set()
-        self._held: dict[UsbIdentity, SerialParams] = {}
-        self._written: dict[UsbIdentity, bytearray] = {}
-        self._ingress: dict[UsbIdentity, bytearray] = {}
-        self._listeners: dict[UsbIdentity, Callable[[bytes], None]] = {}
-        self._paths: dict[UsbIdentity, str] = {}
-        self._occupied_path: dict[UsbIdentity, str] = {}
+        self._present: set[SerialIdentity] = set()
+        self._busy: set[SerialIdentity] = set()
+        self._held: dict[SerialIdentity, SerialParams] = {}
+        self._written: dict[SerialIdentity, bytearray] = {}
+        self._ingress: dict[SerialIdentity, bytearray] = {}
+        self._listeners: dict[SerialIdentity, Callable[[bytes], None]] = {}
+        self._paths: dict[SerialIdentity, str] = {}
+        self._occupied_path: dict[SerialIdentity, str] = {}
         self._on_change: Callable[[], None] | None = None
         self._fail_occupy = 0
         self.occupy_calls = 0
 
-    def plug(self, device: UsbIdentity, path: str = "COM6") -> None:
+    def plug(self, device: SerialIdentity, path: str = "COM6") -> None:
         """让该 USB 身份出现在现场；路径可变。"""
         self._present.add(device)
         self._paths[device] = path
         self._notify()
 
-    def unplug(self, device: UsbIdentity) -> None:
+    def unplug(self, device: SerialIdentity) -> None:
         """拔掉该 USB 身份。"""
         self._present.discard(device)
         self._paths.pop(device, None)
         self._notify()
 
-    def present(self) -> frozenset[UsbIdentity]:
+    def present(self) -> frozenset[SerialIdentity]:
         """此刻现场插着的 USB 身份。"""
         return frozenset(self._present)
 
@@ -68,11 +70,11 @@ class FakeSerial:
         """登记插拔通知。"""
         self._on_change = on_change
 
-    def path_of(self, device: UsbIdentity) -> str:
+    def path_of(self, device: SerialIdentity) -> str:
         """此刻枚举到的路径。"""
         return self._paths[device]
 
-    def occupied_path(self, device: UsbIdentity) -> str:
+    def occupied_path(self, device: SerialIdentity) -> str:
         """最近一次占口时用的路径。"""
         return self._occupied_path[device]
 
@@ -81,7 +83,7 @@ class FakeSerial:
         if self._on_change is not None:
             self._on_change()
 
-    def mark_busy(self, device: UsbIdentity) -> None:
+    def mark_busy(self, device: SerialIdentity) -> None:
         """模拟设备已被别人占用、打不开。"""
         self._busy.add(device)
 
@@ -89,11 +91,11 @@ class FakeSerial:
         """让接下来若干次占口失败，用于测参数回滚后仍恢复旧占口。"""
         self._fail_occupy = times
 
-    def clear_busy(self, device: UsbIdentity) -> None:
+    def clear_busy(self, device: SerialIdentity) -> None:
         """模拟别人放口；设备仍在场。"""
         self._busy.discard(device)
 
-    def occupy(self, device: UsbIdentity, params: SerialParams) -> LineHold:
+    def occupy(self, device: SerialIdentity, params: SerialParams) -> LineHold:
         """按身份占口；不在则等待，被占则冲突。"""
         self.occupy_calls += 1
         if self._fail_occupy > 0:
@@ -110,43 +112,43 @@ class FakeSerial:
         self._occupied_path[device] = self._paths[device]
         return LineHold.HELD
 
-    def release(self, device: UsbIdentity) -> None:
+    def release(self, device: SerialIdentity) -> None:
         """放掉该设备。"""
         self._held.pop(device, None)
         self._written.pop(device, None)
         self._listeners.pop(device, None)
         self._occupied_path.pop(device, None)
 
-    def listen(self, device: UsbIdentity, on_bytes: Callable[[bytes], None]) -> None:
+    def listen(self, device: SerialIdentity, on_bytes: Callable[[bytes], None]) -> None:
         """登记设备字节回调。"""
         self._listeners[device] = on_bytes
 
-    def write(self, device: UsbIdentity, data: bytes) -> None:
+    def write(self, device: SerialIdentity, data: bytes) -> None:
         """记下打进设备的原字节。"""
         self._ingress.setdefault(device, bytearray()).extend(data)
         held = self._written.get(device)
         if held is not None:
             held.extend(data)
 
-    def emit(self, device: UsbIdentity, data: bytes) -> None:
+    def emit(self, device: SerialIdentity, data: bytes) -> None:
         """模拟设备打出原字节。"""
         listener = self._listeners.get(device)
         if listener is not None:
             listener(data)
 
-    def written(self, device: UsbIdentity) -> bytes:
+    def written(self, device: SerialIdentity) -> bytes:
         """取出已打进设备的原字节。"""
         return bytes(self._written.get(device, b""))
 
-    def ingress(self, device: UsbIdentity) -> bytes:
+    def ingress(self, device: SerialIdentity) -> bytes:
         """串通过适配器写下的全部字节，放口后仍保留。"""
         return bytes(self._ingress.get(device, b""))
 
-    def is_held(self, device: UsbIdentity) -> bool:
+    def is_held(self, device: SerialIdentity) -> bool:
         """该设备此刻是否被串通占着。"""
         return device in self._held
 
-    def held_params(self, device: UsbIdentity) -> SerialParams:
+    def held_params(self, device: SerialIdentity) -> SerialParams:
         """当前占口使用的串口参数。"""
         return self._held[device]
 
@@ -1044,3 +1046,29 @@ def test_线路名称会写进存档() -> None:
     restarted.plug(device)
     restored = Comtee(restarted, store)
     assert restored.list_lines()[0].name == "AC 控制台"
+
+
+def test_设置里改绑新蓝牙设备时放开旧口并占住新口且写盘() -> None:
+    """蓝牙重配对生成新身份后，线路可通过 change_line 切换设备并拒绝撞线。"""
+    store = MemoryStore()
+    serial = FakeSerial()
+    old_bt = BluetoothIdentity(hwid="BTHENUM\\OLD_0001")
+    new_bt = BluetoothIdentity(hwid="BTHENUM\\NEW_0002")
+    other = _plugged(serial, "FT999")
+    serial.plug(old_bt, path="COM4")
+    serial.plug(new_bt, path="COM5")
+    hub = Comtee(serial, store)
+    hub.create_line(2222, old_bt, name="蓝牙开关")
+    hub.create_line(3333, other)
+
+    with pytest.raises(ArrangementRejected):
+        hub.change_line(2222, device=other)
+
+    hub.change_line(2222, device=new_bt)
+
+    assert not serial.is_held(old_bt)
+    assert serial.is_held(new_bt)
+    [line_2222, _] = hub.list_lines()
+    assert line_2222.device == new_bt
+    assert line_2222.hold == LineHold.HELD
+    assert store.load()[0].device == new_bt

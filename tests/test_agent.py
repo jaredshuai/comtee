@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from comtee import Comtee, LineHold, UsbIdentity
+from comtee import BluetoothIdentity, Comtee, LineHold, UsbIdentity
 from comtee.agent import AgentBridge
 from tests.test_comtee import FakeHuman, FakeSerial, MemoryStore
 
@@ -194,3 +194,28 @@ def test_改入口后Agent必须指名新端口() -> None:
     assert stale["ok"] is False
     assert moved["ok"] is True
     assert serial.written(device) == b"ac"
+
+
+def test_蓝牙线路在Agent列表里展示硬件标识而非USB字段() -> None:
+    """蓝牙线路列出时应声明 device_type=bluetooth 并携带规范化 hwid。"""
+    serial = FakeSerial()
+    device = BluetoothIdentity(
+        hwid=(
+            "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0046\\"
+            "8&2ECCB597&0&04220520037B_C00000000"
+        )
+    )
+    serial.plug(device, path="COM5")
+    hub = Comtee(serial, MemoryStore())
+    hub.create_line(2222, device)
+    bridge = AgentBridge(hub)
+
+    listed = bridge.handle({"op": "list"})
+
+    assert listed["ok"] is True
+    [entry] = listed["lines"]
+    assert entry["device_type"] == "bluetooth"
+    assert entry["hwid"] == device.hwid
+    assert "vid" not in entry
+    assert "pid" not in entry
+    assert "serial" not in entry

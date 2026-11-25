@@ -6,7 +6,14 @@ import json
 import threading
 from typing import Any
 
-from comtee.hub import Agent, AgentForbidden, Comtee, LineHold, LineStatus
+from comtee.hub import (
+    Agent,
+    AgentForbidden,
+    BluetoothIdentity,
+    Comtee,
+    LineHold,
+    LineStatus,
+)
 
 PIPE_NAME = r"\\.\pipe\comtee"
 
@@ -115,11 +122,10 @@ class AgentBridge:
 
 def _line_view(line: LineStatus) -> dict:
     """列出状态时不带设备字节。"""
-    return {
+    device = line.device
+    result = {
         "human_entry": line.human_entry,
-        "vid": line.device.vid,
-        "pid": line.device.pid,
-        "serial": line.device.serial,
+        "device_type": "bluetooth" if isinstance(device, BluetoothIdentity) else "usb",
         "hold": line.hold,
         "decode": line.decode,
         "human_clients": line.human_clients,
@@ -128,6 +134,17 @@ def _line_view(line: LineStatus) -> dict:
         "human_listening": line.human_listening,
         "writable": line.hold == LineHold.HELD,
     }
+    if isinstance(device, BluetoothIdentity):
+        result["hwid"] = device.hwid
+    else:
+        result.update(
+            {
+                "vid": device.vid,
+                "pid": device.pid,
+                "serial": device.serial,
+            }
+        )
+    return result
 
 
 _PIPE_ACCESS_DUPLEX = 0x00000003

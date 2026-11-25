@@ -16,7 +16,6 @@ from comtee.hub import (
     LineHold,
     LineStatus,
     SerialApplyFailed,
-    UsbIdentity,
 )
 from comtee.line_edit import (
     ALLOWED_DATA_BITS,
@@ -57,6 +56,7 @@ from comtee.line_edit import (
     validate_draft,
 )
 from comtee.panel_style import PANEL_CSS
+from comtee.usb_serial import SerialScan
 
 _TITLE = "串通"
 _MARK_SVG = (
@@ -76,11 +76,11 @@ _ICON = {
 
 def build_panel(
     hub: Comtee,
-    list_paths: Callable[[], dict[UsbIdentity, str]],
+    scan_devices: Callable[[], SerialScan],
     autostart: AutoStart | PreferredAutoStart,
 ) -> None:
     """画出 B 布局面板。关窗不等于退出，由调用方接托盘。"""
-    Panel(hub, list_paths, autostart).build()
+    Panel(hub, scan_devices, autostart).build()
 
 
 class Panel:
@@ -89,12 +89,12 @@ class Panel:
     def __init__(
         self,
         hub: Comtee,
-        list_paths: Callable[[], dict[UsbIdentity, str]],
+        scan_devices: Callable[[], SerialScan],
         autostart: AutoStart | PreferredAutoStart,
     ) -> None:
-        """注入串通、现场枚举和自启偏好。"""
+        """注入串通、现场扫描和自启偏好。"""
         self._hub = hub
-        self._list_paths = list_paths
+        self._scan_devices = scan_devices
         self._autostart = autostart
         self._selected: int | None = None
         self._collapsed = False
@@ -224,7 +224,8 @@ class Panel:
         with ui.element("section").classes("empty"):
             ui.html("<h2>接入你的第一条线路</h2>", sanitize=False)
             ui.label(
-                "插上 USB 转接器，为设备留一个人端入口。人和 Agent 就能从同一条线路接入。"
+                "接入 USB 转接器或配对蓝牙串口，为设备留一个人端入口。"
+                "人和 Agent 就能从同一条线路接入。"
             )
             ui.button("＋ 新建线路", on_click=lambda: self._open_editor(None)).props(
                 "no-caps unelevated"
@@ -249,7 +250,7 @@ class Panel:
 
     def _rail_item(self, line: LineStatus, active: bool) -> None:
         """一条线路的列表项；折叠后仍保留名称、入口和状态。"""
-        view = status_to_view(line, self._path_of(line))
+        view = self._view_of(line)
         health = line_health(view)
         summary = collapsed_rail(view)
         port = summary.port
@@ -299,7 +300,7 @@ class Panel:
 
     def _fill_detail(self, line: LineStatus) -> None:
         """右侧详情：先名称、入口和占口，再完整串口参数。"""
-        view = status_to_view(line, self._path_of(line))
+        view = self._view_of(line)
         health = line_health(view)
         layers = detail_layers(view)
         params = line.serial_params
@@ -408,10 +409,14 @@ class Panel:
         ).classes("device-info"):
             path_text = "设备未接入" if missing else f"当前 {view.device_path}"
             self._labels["devpath"] = ui.label(path_text)
-            ui.label(f"USB 身份  {view.device_key}").classes("mono")
+            ui.label(f"设备身份  {view.device_key}").classes("mono")
             ui.label(
-                "线路按 USB 身份识别转接器，COM 路径可能变化。线路名称由你填写；"
-                "转接器换接到另一台机器后，请自行核对名称。"
+                f"现场扫描  USB {view.usb_ports} · 蓝牙 {view.bluetooth_ports} · "
+                f"无稳定身份 {view.unidentified_ports}"
+            ).classes("tiny muted")
+            ui.label(
+                "线路按 USB 或蓝牙硬件身份识别设备，COM 路径可能变化。线路名称由你填写；"
+                "设备重新配对后若硬件标识变化，请重新选择设备。"
             ).classes("tiny muted")
         with ui.element("div").classes("detail-bottom"):
             ui.label("关掉窗口后，串通仍在托盘运行。")
@@ -495,7 +500,7 @@ class Panel:
     def _patch(self, lines: Sequence[LineStatus]) -> None:
         """一秒一次更新状态文字，不拆掉详情和折叠。"""
         selected = self._line(lines)
-        view = status_to_view(selected, self._path_of(selected))
+        view = self._view_of(selected)
         health = line_health(view)
         params = selected.serial_params
         missing = selected.hold == LineHold.WAITING
@@ -553,7 +558,7 @@ class Panel:
             else "尚无设备输出；没有输出本身不能证明参数错误。",
         )
         for line in lines:
-            rail_view = status_to_view(line, self._path_of(line))
+            rail_view = self._view_of(line)
             item = line_health(rail_view)
             summary = collapsed_rail(rail_view)
             port = line.human_entry
@@ -603,9 +608,7 @@ class Panel:
         """第一次看见线路时记下快照，避免把初始状态当成恢复。"""
         for line in lines:
             if line.human_entry not in self._views:
-                self._views[line.human_entry] = status_to_view(
-                    line, self._path_of(line)
-                )
+                self._views[line.human_entry] = self._view_of(line)
 
     def _track_recovery(self, lines: Sequence[LineStatus]) -> None:
         """设备插回、占用解除或入口恢复监听时给一句反馈，只报一次。"""
@@ -613,7 +616,7 @@ class Panel:
         for port in [entry for entry in self._views if entry not in live]:
             self._views.pop(port, None)
         for line in lines:
-            view = status_to_view(line, self._path_of(line))
+            view = self._view_of(line)
             previous = self._views.get(line.human_entry)
             self._views[line.human_entry] = view
             if previous is None:
@@ -639,7 +642,7 @@ class Panel:
             return
         before = self._notice
         self._track_recovery(self._hub.list_lines())
-        view = status_to_view(after, self._path_of(after))
+        view = self._view_of(after)
         health = line_health(view)
         if health.retry_hold or health.retry_listen:
             ui.notify("仍未恢复，请按提示处理后再试")
@@ -660,9 +663,16 @@ class Panel:
                 return line
         return lines[0]
 
-    def _path_of(self, line: LineStatus) -> str:
-        """此刻 COM 路径；不在现场则空。"""
-        return self._list_paths().get(line.device, "")
+    def _view_of(self, line: LineStatus) -> LineView:
+        """一次扫描同时得到 COM 路径和被忽略串口数量。"""
+        scan = self._scan_devices()
+        return status_to_view(
+            line,
+            scan.paths.get(line.device, ""),
+            usb_ports=scan.usb,
+            bluetooth_ports=scan.bluetooth,
+            unidentified_ports=scan.unidentified,
+        )
 
     def _copy(self, text: str, ok: str) -> None:
         """复制文本到剪贴板。"""
@@ -701,9 +711,9 @@ class Panel:
             stop_value = str(seed.stop_bits)
             decode_value = seed.decode
             if choices.hint is not None:
-                subtitle = "先接入可用的 USB 转接器，再创建线路。"
+                subtitle = "先接入 USB 转接器或配对蓝牙串口，再创建线路。"
             else:
-                subtitle = "选择 USB 设备，留一个人端入口。"
+                subtitle = "选择 USB 或蓝牙串口，留一个人端入口。"
         else:
             params = line.serial_params
             port_value = line.human_entry
@@ -780,22 +790,22 @@ class Panel:
                     ui.select(
                         options=device_options,
                         value=choices.default or "",
-                        label="USB 设备",
+                        label="串口设备",
                     )
                     .props("outlined")
                     .classes("w-full")
                 )
-                if line is not None or not choices.options:
+                if not choices.options:
                     self._form["device"].disable()
             if line is not None:
-                device_help = "此线路的设备绑定保持不变。"
-            elif choices.hint is not None:
                 device_help = (
-                    "没有可选设备时无法创建线路。COM 路径会变，请看 USB 身份。"
+                    "需要更换转接器或蓝牙重新配对后，可在此重新选择当前可用设备。"
                 )
+            elif choices.hint is not None:
+                device_help = "没有可选设备时无法创建线路。COM 路径会变，请看设备身份。"
             else:
                 device_help = (
-                    "选项同时给出当前 COM 路径和稳定 USB 身份（VID:PID、序列号）。"
+                    "选项同时给出当前 COM 路径和稳定设备身份（USB VID:PID/序列号或蓝牙硬件标识）。"
                     "已被其他线路使用的设备不可重复选择。"
                 )
             self._form["device_help"] = ui.label(device_help).classes("tiny muted")
@@ -894,7 +904,7 @@ class Panel:
         draft = self._read_draft(line)
         if draft is None:
             return
-        view = status_to_view(line, self._path_of(line)) if line is not None else None
+        view = self._view_of(line) if line is not None else None
         impact = impact_text(view, draft, creating=line is None)
         self._form["preview"].set_text(format_preview(draft))
         self._form["impact"].set_text(impact.message)
@@ -907,13 +917,20 @@ class Panel:
             self._form["save"].set_text(impact.submit_label)
 
     def _rescan_create_devices(self) -> None:
-        """弹窗内重新读取现场 USB 设备，不重建已填表单。"""
+        """弹窗内重新读取现场串口设备，不重建已填表单。"""
         used = {item.human_entry for item in self._hub.list_lines()}
         draft = self._read_draft(None)
         if draft is None:
             draft = default_create_draft(suggest_port(used))
         assigned = {item.device for item in self._hub.list_lines()}
-        result = apply_device_rescan(self._list_paths(), assigned, draft)
+        scan = self._scan_devices()
+        result = apply_device_rescan(
+            scan.paths,
+            assigned,
+            draft,
+            bluetooth_ports=scan.bluetooth,
+            unidentified_ports=scan.unidentified,
+        )
         self._apply_create_device_rescan(result)
         if result.found:
             self._refresh_impact(None)
@@ -932,10 +949,10 @@ class Panel:
             self._form["device_hint_box"].style("display:none")
             self._form["device_rescan_quiet"].style("display:inline-flex")
             self._form["device_help"].set_text(
-                "选项同时给出当前 COM 路径和稳定 USB 身份（VID:PID、序列号）。"
+                "选项同时给出当前 COM 路径和稳定设备身份（USB VID:PID/序列号或蓝牙硬件标识）。"
                 "已被其他线路使用的设备不可重复选择。"
             )
-            self._form["subtitle"].set_text("选择 USB 设备，留一个人端入口。")
+            self._form["subtitle"].set_text("选择 USB 或蓝牙串口，留一个人端入口。")
             return
         device.disable()
         if save is not None:
@@ -946,9 +963,9 @@ class Panel:
         self._form["device_hint_box"].style("display:block")
         self._form["device_rescan_quiet"].style("display:none")
         self._form["device_help"].set_text(
-            "没有可选设备时无法创建线路。COM 路径会变，请看 USB 身份。"
+            "没有可选设备时无法创建线路。COM 路径会变，请看设备身份。"
         )
-        self._form["subtitle"].set_text("先接入可用的 USB 转接器，再创建线路。")
+        self._form["subtitle"].set_text("先接入 USB 转接器或配对蓝牙串口，再创建线路。")
 
     def _read_draft(self, line: LineStatus | None) -> Draft | None:
         """从对话框控件读出一份草稿；尚未画完则空。"""
@@ -1005,7 +1022,7 @@ class Panel:
                 or draft.device_key not in self._present_keys()
             ):
                 self._show_form_error(
-                    "请选择一台可用的 USB 设备。",
+                    "请选择一台可用的串口设备。",
                     "同一台设备只能分配给一条线路，未接入的设备不能新建。"
                     if draft.device_key in assigned
                     else "这台设备已经不在现场。请重新接入后创建线路。",
@@ -1034,9 +1051,16 @@ class Panel:
                 old_port = line.human_entry
                 port_changed = draft.port != old_port
                 params_changed = draft_serial_params(draft) != line.serial_params
+                device_changed = bool(
+                    draft.device_key
+                ) and draft.device_key != identity_key(line.device)
+                new_device = (
+                    parse_identity_key(draft.device_key) if device_changed else None
+                )
                 self._hub.change_line(
                     old_port,
                     new_entry=draft.port if port_changed else None,
+                    device=new_device,
                     name=draft.name,
                     serial_params=draft_serial_params(draft),
                     decode=draft.decode,
@@ -1049,6 +1073,12 @@ class Panel:
                 if port_changed:
                     message = "原人端连接已断开，请使用新入口重新接入。"
                     title = f"人端入口已从 {old_port} 改为 {draft.port}"
+                elif device_changed and after.hold == LineHold.WAITING:
+                    message = "设备绑定已更新，新设备将在接入后占口。"
+                    title = "线路设置已保存"
+                elif device_changed:
+                    message = "已切换到新设备并重新占口。"
+                    title = "线路设置已保存"
                 elif params_changed and after.hold == LineHold.WAITING:
                     message = "新参数将在设备接入后应用。"
                     title = "线路设置已保存"
@@ -1095,25 +1125,30 @@ class Panel:
         self._set_dialog_open(False)
 
     def _device_options(self, line: LineStatus | None) -> DeviceChoice:
-        """创建设备下拉：可用的在场设备；编辑时只展示当前绑定。"""
-        paths = self._list_paths()
+        """创建设备下拉：可用的在场设备；编辑时保留当前绑定并列出可切换设备。"""
+        scan = self._scan_devices()
         assigned = {item.device for item in self._hub.list_lines()}
         if line is None:
-            return create_device_choices(paths, assigned)
+            return create_device_choices(
+                scan.paths,
+                assigned,
+                bluetooth_ports=scan.bluetooth,
+                unidentified_ports=scan.unidentified,
+            )
         return create_device_choices(
-            paths,
+            scan.paths,
             assigned,
             current=line.device,
-            current_path=paths.get(line.device, ""),
+            current_path=scan.paths.get(line.device, ""),
         )
 
     def _present_keys(self) -> set[str]:
-        """此刻插着的 USB 身份键。"""
-        return {identity_key(identity) for identity in self._list_paths()}
+        """此刻插着的稳定设备身份键。"""
+        return {identity_key(identity) for identity in self._scan_devices().paths}
 
     def _open_agent_help(self, line: LineStatus) -> None:
         """展示可复制的 Agent 线路说明。"""
-        view = status_to_view(line, self._path_of(line))
+        view = self._view_of(line)
         text = agent_share_text(view)
         self._set_dialog_open(True)
         self._confirm.clear()
@@ -1148,7 +1183,7 @@ class Panel:
             return
         self._set_dialog_open(True)
         self._confirm.clear()
-        impact = remove_impact(status_to_view(line, self._path_of(line)))
+        impact = remove_impact(self._view_of(line))
         with self._confirm, ui.card().classes("dialog-card small"):
             with ui.element("div").classes("dialoghead"):
                 ui.html(f"<h2>{impact.title}</h2>", sanitize=False)

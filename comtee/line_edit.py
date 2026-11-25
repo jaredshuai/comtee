@@ -4,7 +4,14 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from comtee.hub import LineHold, LineStatus, SerialParams, UsbIdentity
+from comtee.hub import (
+    BluetoothIdentity,
+    LineHold,
+    LineStatus,
+    SerialIdentity,
+    SerialParams,
+    UsbIdentity,
+)
 
 ALLOWED_DATA_BITS = (5, 6, 7, 8)
 ALLOWED_PARITY = ("N", "E", "O")
@@ -57,6 +64,9 @@ class LineView:
     decode: str
     device_key: str
     device_path: str
+    usb_ports: int = 0
+    bluetooth_ports: int = 0
+    unidentified_ports: int = 0
 
 
 @dataclass(frozen=True)
@@ -356,7 +366,9 @@ def validate_draft(draft: Draft) -> FieldError | None:
         )
     if not draft.device_key:
         return FieldError(
-            "device", "请选择一台可用的 USB 设备。", "同一台设备只能分配给一条线路。"
+            "device",
+            "请选择一台可用的 USB 或蓝牙串口。",
+            "同一台设备只能分配给一条线路。",
         )
     return None
 
@@ -383,7 +395,7 @@ def serial_changed(view: LineView, draft: Draft) -> bool:
 
 
 def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impact:
-    """保存前说明会不会换入口、会不会重新占口；两项同时改时都要说清。"""
+    """保存前说明会不会换入口、换设备或重新占口；多项同时改时都要说清。"""
     if creating or view is None:
         return Impact(
             "创建成功后，设备由串通占用。你可以复制地址连接 Telnet，或复制线路说明交给 Agent。",
@@ -391,6 +403,7 @@ def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impac
             "创建线路",
         )
     port_change = draft.port != view.human_entry
+    device_change = bool(draft.device_key) and draft.device_key != view.device_key
     params_change = serial_changed(view, draft)
     if port_change:
         clients = (
@@ -402,6 +415,13 @@ def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impac
             f"保存后切换人端入口。{clients}Agent 后续需指名新端口。"
             "新端口不可用时，原线路与配置保留。"
         )
+        if device_change:
+            return Impact(
+                f"{message} 设备绑定有变化：保存时会释放原设备并占用新设备，数据传输会短暂中断。",
+                True,
+                "保存并切换入口",
+                True,
+            )
         if params_change and view.hold == LineHold.WAITING:
             return Impact(
                 f"{message} 串口参数也会保存，设备插回时按新参数占口。",
@@ -417,6 +437,13 @@ def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impac
                 True,
             )
         return Impact(message, True, "保存并切换入口", False)
+    if device_change:
+        return Impact(
+            "设备绑定有变化：保存时会释放原设备并占用新设备，数据传输会短暂中断。",
+            True,
+            "保存设置",
+            True,
+        )
     if params_change:
         if view.hold == LineHold.WAITING:
             message = "设备未接入：先保存设置，设备插回时按新参数占口。"
@@ -429,6 +456,20 @@ def impact_text(view: LineView | None, draft: Draft, *, creating: bool) -> Impac
         "保存设置",
         False,
     )
+
+
+def ignored_port_note(*, unidentified_ports: int) -> str:
+    """说明现场有哪些串口因没有稳定身份而被忽略。"""
+    if unidentified_ports <= 0:
+        return ""
+    return f"现场另有 {unidentified_ports} 个缺少稳定身份的串口，未纳入线路。"
+
+
+def _waiting_reason(unidentified_ports: int) -> str:
+    """等待设备时的原因说明；现场有被忽略串口时一并指出。"""
+    reason = "线路还在，但这台设备此刻不在现场。"
+    note = ignored_port_note(unidentified_ports=unidentified_ports)
+    return f"{reason}{note}" if note else reason
 
 
 def line_health(view: LineView) -> LineHealth:
@@ -475,9 +516,10 @@ def line_health(view: LineView) -> LineHealth:
             "请关闭占用这个端口的程序，然后点「重试监听」；或在线路设置里换一个入口。"
         )
     elif view.hold == LineHold.WAITING:
-        reason = "线路还在，但这台设备此刻不在现场。"
+        reason = _waiting_reason(view.unidentified_ports)
         next_action = (
-            "插回同一 USB 转接器。人端不用断开，写入现在不会发送，恢复后也不会补发。"
+            "让同一 USB 或蓝牙串口重新出现。人端不用断开，写入现在不会发送，"
+            "恢复后也不会补发。"
         )
     elif view.hold == LineHold.CONFLICT:
         reason = "设备在场，但被其他程序占用，串通占不到口。"
@@ -535,9 +577,9 @@ def failure_notices(view: LineView) -> tuple[StatusNotice, ...]:
             StatusNotice(
                 kind="waiting",
                 title="等待设备重新接入",
-                reason="线路还在，但这台设备此刻不在现场。",
+                reason=_waiting_reason(view.unidentified_ports),
                 next_action=(
-                    "插回同一 USB 转接器。人端不用断开，"
+                    "让同一 USB 或蓝牙串口重新出现。人端不用断开，"
                     "写入现在不会发送，恢复后也不会补发。"
                 ),
                 action="",
@@ -567,7 +609,9 @@ def recovery_notice(previous: LineView, current: LineView) -> RecoveryNotice | N
     recovered_listen = (not previous.human_listening) and current.human_listening
     if recovered_hold and previous.hold == LineHold.WAITING:
         title = "设备已插回并占口"
-        message = "同一 USB 身份已对上。现在可以继续读写；断线期间的写入没有补发。"
+        message = (
+            "同一 USB 或蓝牙身份已对上。现在可以继续读写；断线期间的写入没有补发。"
+        )
     elif recovered_hold and previous.hold == LineHold.CONFLICT:
         title = "占用冲突已解除"
         message = (
@@ -623,8 +667,10 @@ def suggest_port(used: set[int], start: int = 2222) -> int:
     return port
 
 
-def identity_key(identity: UsbIdentity) -> str:
+def identity_key(identity: SerialIdentity) -> str:
     """下拉框用的身份键，不是 COM 路径。"""
+    if isinstance(identity, BluetoothIdentity):
+        return f"BT|{identity.hwid}"
     return f"{identity.vid:04X}:{identity.pid:04X}|{identity.serial}"
 
 
@@ -637,56 +683,102 @@ def usb_identity_text(identity: UsbIdentity) -> str:
     return vid_pid
 
 
-def device_option_label(path: str, identity: UsbIdentity) -> str:
-    """设备选项同时给出当前 COM 路径和稳定 USB 身份。"""
+def bluetooth_identity_text(identity: BluetoothIdentity) -> str:
+    """展示蓝牙硬件标识里的远端地址和服务实例。"""
+    tail = identity.hwid.rsplit("\\", 1)[-1]
+    address_part, _, instance = tail.partition("_")
+    address = address_part.rsplit("&", 1)[-1]
+    if len(address) == 12 and all(char in "0123456789ABCDEF" for char in address):
+        shown_address = ":".join(
+            address[index : index + 2] for index in range(0, len(address), 2)
+        )
+        suffix = f" · 实例 {instance}" if instance else ""
+        return f"地址 {shown_address}{suffix}"
+    return f"硬件标识 {tail}"
+
+
+def device_option_label(path: str, identity: SerialIdentity) -> str:
+    """设备选项同时给出当前 COM 路径和稳定设备身份。"""
     shown = path.strip() or "未接入"
+    if isinstance(identity, BluetoothIdentity):
+        return f"{shown} · 蓝牙 {bluetooth_identity_text(identity)}"
     return f"{shown} · USB {usb_identity_text(identity)}"
 
 
-def empty_device_hint(*, present: int, available: int) -> DeviceHint | None:
+def empty_device_hint(
+    *,
+    present: int,
+    available: int,
+    bluetooth_ports: int = 0,
+    unidentified_ports: int = 0,
+) -> DeviceHint | None:
     """打开创建流程时，没有可选设备就给出可行动提示。"""
     if available > 0:
         return None
     if present > 0:
         return DeviceHint(
-            "没有可分配的 USB 设备",
-            "现场设备都已分配给其他线路。请先拆掉一条线路，或再插入另一台 USB 转接器。",
+            "没有可分配的串口设备",
+            "现场的 USB 或蓝牙串口都已分配给其他线路。请先拆掉一条线路，或再配对另一台设备。",
             "rescan",
             "重新扫描设备",
         )
+    note = ignored_port_note(unidentified_ports=unidentified_ports)
+    detail = (
+        f"{note}请插入带稳定序列号的 USB 转接器，或配对蓝牙串口，"
+        "然后点「重新扫描设备」。"
+        if note
+        else "现场没有可用的串口设备。请插入带稳定序列号的 USB 转接器，"
+        "或配对蓝牙串口，然后点「重新扫描设备」。"
+    )
     return DeviceHint(
-        "没有可用的 USB 设备",
-        "现场没有可用的 USB 串口设备。请插入带序列号的 USB 转接器，"
-        "然后点「重新扫描设备」；蓝牙虚拟口不会出现在这里。",
+        "没有可用的串口设备",
+        detail,
         "rescan",
         "重新扫描设备",
     )
 
 
 def apply_device_rescan(
-    paths: Mapping[UsbIdentity, str],
-    assigned: set[UsbIdentity],
+    paths: Mapping[SerialIdentity, str],
+    assigned: set[SerialIdentity],
     draft: Draft,
+    *,
+    bluetooth_ports: int = 0,
+    unidentified_ports: int = 0,
 ) -> RescanResult:
     """按现场重新枚举设备；只更新设备选项，不改名称、端口和串口参数。"""
-    choices = create_device_choices(paths, assigned)
+    choices = create_device_choices(
+        paths,
+        assigned,
+        bluetooth_ports=bluetooth_ports,
+        unidentified_ports=unidentified_ports,
+    )
     if choices.default:
         return RescanResult(choices, choices.default, True, None)
     return RescanResult(choices, draft.device_key, False, choices.hint)
 
 
 def create_device_choices(
-    paths: Mapping[UsbIdentity, str],
-    assigned: set[UsbIdentity],
+    paths: Mapping[SerialIdentity, str],
+    assigned: set[SerialIdentity],
     *,
-    current: UsbIdentity | None = None,
+    current: SerialIdentity | None = None,
     current_path: str = "",
+    bluetooth_ports: int = 0,
+    unidentified_ports: int = 0,
 ) -> DeviceChoice:
-    """创建设备下拉：过滤已分配；编辑时只展示当前绑定。"""
+    """创建设备下拉：过滤已分配；编辑时保留当前绑定并列出可切换设备。"""
     if current is not None:
-        key = identity_key(current)
+        current_key = identity_key(current)
         path = current_path or "未接入"
-        return DeviceChoice({key: device_option_label(path, current)}, key, None)
+        options: dict[str, str] = {current_key: device_option_label(path, current)}
+        for identity, present_path in paths.items():
+            if identity == current or identity in assigned:
+                continue
+            options[identity_key(identity)] = device_option_label(
+                present_path, identity
+            )
+        return DeviceChoice(options, current_key, None)
     options: dict[str, str] = {}
     default: str | None = None
     for identity, path in paths.items():
@@ -699,18 +791,32 @@ def create_device_choices(
     return DeviceChoice(
         options,
         default,
-        empty_device_hint(present=len(paths), available=len(options)),
+        empty_device_hint(
+            present=len(paths),
+            available=len(options),
+            bluetooth_ports=bluetooth_ports,
+            unidentified_ports=unidentified_ports,
+        ),
     )
 
 
-def parse_identity_key(text: str) -> UsbIdentity:
-    """从身份键还原 USB 身份。"""
+def parse_identity_key(text: str) -> SerialIdentity:
+    """从身份键还原 USB 或蓝牙身份。"""
+    if text.startswith("BT|"):
+        return BluetoothIdentity(hwid=text[3:])
     vid_pid, serial = text.split("|", 1)
     vid_s, pid_s = vid_pid.split(":", 1)
     return UsbIdentity(vid=int(vid_s, 16), pid=int(pid_s, 16), serial=serial)
 
 
-def status_to_view(line: LineStatus, path: str) -> LineView:
+def status_to_view(
+    line: LineStatus,
+    path: str,
+    *,
+    usb_ports: int = 0,
+    bluetooth_ports: int = 0,
+    unidentified_ports: int = 0,
+) -> LineView:
     """把串通状态收成面板视图。"""
     return LineView(
         human_entry=line.human_entry,
@@ -723,6 +829,9 @@ def status_to_view(line: LineStatus, path: str) -> LineView:
         decode=line.decode,
         device_key=identity_key(line.device),
         device_path=path,
+        usb_ports=usb_ports,
+        bluetooth_ports=bluetooth_ports,
+        unidentified_ports=unidentified_ports,
     )
 
 

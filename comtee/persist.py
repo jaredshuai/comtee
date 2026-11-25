@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from comtee.hub import LineArrangement, SerialParams, UsbIdentity
+from comtee.hub import BluetoothIdentity, LineArrangement, SerialParams, UsbIdentity
 
 
 class FileArrangementStore:
@@ -67,11 +67,8 @@ class UserSettings:
 
 def _to_dict(line: LineArrangement) -> dict:
     """把一条编排变成可写盘的字典。"""
-    return {
+    payload = {
         "human_entry": line.human_entry,
-        "vid": line.device.vid,
-        "pid": line.device.pid,
-        "serial": line.device.serial,
         "baudrate": line.serial_params.baudrate,
         "data_bits": line.serial_params.data_bits,
         "parity": line.serial_params.parity,
@@ -80,17 +77,35 @@ def _to_dict(line: LineArrangement) -> dict:
         "decode": line.decode,
         "name": line.name,
     }
+    if isinstance(line.device, BluetoothIdentity):
+        payload.update({"device_type": "bluetooth", "hwid": line.device.hwid})
+    else:
+        payload.update(
+            {
+                "vid": line.device.vid,
+                "pid": line.device.pid,
+                "serial": line.device.serial,
+            }
+        )
+    return payload
 
 
 def _from_dict(item: dict) -> LineArrangement:
     """从存档字典恢复一条编排。"""
-    return LineArrangement(
-        human_entry=int(item["human_entry"]),
-        device=UsbIdentity(
+    device_type = str(item.get("device_type", "usb"))
+    if device_type == "bluetooth":
+        device = BluetoothIdentity(hwid=str(item["hwid"]))
+    elif device_type == "usb":
+        device = UsbIdentity(
             vid=int(item["vid"]),
             pid=int(item["pid"]),
             serial=str(item["serial"]),
-        ),
+        )
+    else:
+        raise ValueError(f"不支持的设备类型: {device_type}")
+    return LineArrangement(
+        human_entry=int(item["human_entry"]),
+        device=device,
         serial_params=SerialParams(
             baudrate=int(item["baudrate"]),
             data_bits=int(item["data_bits"]),

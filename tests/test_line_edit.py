@@ -1,6 +1,6 @@
 """线路设置的可测层：校验、串口格式和保存影响说明。"""
 
-from comtee.hub import LineHold, SerialParams, UsbIdentity
+from comtee.hub import BluetoothIdentity, LineHold, SerialParams, UsbIdentity
 from comtee.line_edit import (
     AGENT_PIPE,
     ALLOWED_CHARSETS,
@@ -26,6 +26,7 @@ from comtee.line_edit import (
     impact_text,
     line_health,
     listen_address,
+    parse_identity_key,
     recovery_notice,
     remove_impact,
     serial_format,
@@ -213,6 +214,17 @@ def test_失败状态带原因和下一步() -> None:
     assert port[0].action_label == "重试监听"
 
 
+def test_等待设备时说明无稳定身份串口为何不可选() -> None:
+    """扫描到没有稳定身份的口时，等待状态要解释原因。"""
+    notice = failure_notices(
+        _view(
+            hold=LineHold.WAITING,
+            unidentified_ports=1,
+        )
+    )[0]
+    assert "1 个缺少稳定身份的串口" in notice.reason
+
+
 def test_未占口时线路不可写() -> None:
     """等待设备或占用冲突时，面板必须标成不可写。"""
     waiting = line_health(_view(hold=LineHold.WAITING))
@@ -268,6 +280,26 @@ def test_设备选项同时包含COM路径和USB身份() -> None:
     assert choices.hint is None
 
 
+def test_蓝牙设备进入新建选项并展示稳定身份() -> None:
+    """蓝牙串口可以创建线路，选项里保留路径和远端地址。"""
+    identity = BluetoothIdentity(
+        hwid=(
+            "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0046\\"
+            "8&2ECCB597&0&04220520037B_C00000000"
+        )
+    )
+
+    label = device_option_label("COM7", identity)
+    choices = create_device_choices({identity: "COM7"}, set())
+
+    assert "COM7" in label
+    assert "蓝牙" in label
+    assert "04:22:05:20:03:7B" in label
+    assert choices.options[identity_key(identity)] == label
+    assert choices.default == identity_key(identity)
+    assert choices.hint is None
+
+
 def test_已分配设备不出现在新建选项() -> None:
     """同一台设备只能给一条线路，已占用的要从新建列表拿掉。"""
     taken = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
@@ -297,6 +329,14 @@ def test_没有设备时新建给出可行动提示() -> None:
     assert assigned_only.hint is not None
     assert "拆掉" in assigned_only.hint.message or "插入" in assigned_only.hint.message
     assert assigned_only.hint.action_label == "重新扫描设备"
+
+
+def test_新建提示会说明扫描到的无身份串口() -> None:
+    """扫描到没有稳定身份的口时，空设备提示要说清楚原因。"""
+    choices = create_device_choices({}, set(), unidentified_ports=1)
+    assert choices.hint is not None
+    assert "1 个缺少稳定身份的串口" in choices.hint.message
+    assert "蓝牙串口" in choices.hint.message
 
 
 def test_重新扫描插入设备后出现COM和USB身份且保留草稿() -> None:
@@ -390,6 +430,59 @@ def test_COM路径变化后设备选项仍按同一USB身份() -> None:
     assert "FT123" in moved.options[key]
 
 
+def test_parse_identity_key还原USB与规范化蓝牙身份() -> None:
+    """parse_identity_key 要同时还原 USB 身份和规范化后的蓝牙硬件标识。"""
+    usb = parse_identity_key("0403:6001|FT123")
+    bt = parse_identity_key(
+        "BT|bthenum\\{00001101-0000-1000-8000-00805f9b34fb}_localmfg&0046\\"
+        "8&2eccb597&0&04220520037b_c00000000"
+    )
+    assert usb == UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    assert bt == BluetoothIdentity(
+        hwid=(
+            "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0046\\"
+            "8&2ECCB597&0&04220520037B_C00000000"
+        )
+    )
+
+
+def test_编辑线路时设备下拉保留当前绑定并列出可切换设备() -> None:
+    """蓝牙重配对后编辑线路要能看到未分配的在场设备，同时排除他线设备。"""
+    current = BluetoothIdentity(hwid="BTHENUM\\OLD_0001")
+    repaired = BluetoothIdentity(hwid="BTHENUM\\NEW_0002")
+    other = UsbIdentity(vid=0x0403, pid=0x6001, serial="OTHER")
+    choices = create_device_choices(
+        {repaired: "COM5", other: "COM6"},
+        {current, other},
+        current=current,
+        current_path="",
+    )
+    assert list(choices.options) == [identity_key(current), identity_key(repaired)]
+    assert choices.default == identity_key(current)
+    assert identity_key(other) not in choices.options
+
+
+def test_修改设备绑定时保存影响给出中断提示() -> None:
+    """设置里切换设备必须提醒会释放原设备并重占新设备。"""
+    new_bt = BluetoothIdentity(hwid="BTHENUM\\NEW_0002")
+    draft = _draft()
+    draft = Draft(
+        name=draft.name,
+        port=draft.port,
+        baud=draft.baud,
+        data_bits=draft.data_bits,
+        parity=draft.parity,
+        stop_bits=draft.stop_bits,
+        flow_control=draft.flow_control,
+        decode=draft.decode,
+        device_key=identity_key(new_bt),
+    )
+    impact = impact_text(_view(), draft, creating=False)
+    assert impact.warning is True
+    assert impact.reopens_serial is True
+    assert "设备" in impact.message
+
+
 def _draft(
     *,
     name: str = "AC 控制台",
@@ -418,6 +511,8 @@ def _view(
     name: str = "AC 控制台",
     human_clients: int = 2,
     agent_connected: bool = True,
+    bluetooth_ports: int = 0,
+    unidentified_ports: int = 0,
 ) -> LineView:
     """当前线路的只读视图，给影响说明和状态文案用。"""
     return LineView(
@@ -431,4 +526,6 @@ def _view(
         decode="gbk",
         device_key="0403:6001|FT123",
         device_path="COM6",
+        bluetooth_ports=bluetooth_ports,
+        unidentified_ports=unidentified_ports,
     )

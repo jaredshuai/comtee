@@ -1,12 +1,26 @@
-"""串口适配器缝：按 USB 身份认设备，丢掉蓝牙虚拟口。"""
+"""串口适配器缝：按 USB 或蓝牙身份认设备。"""
 
 import queue
 import threading
 import time
 from collections.abc import Callable
 
-from comtee import Comtee, LineArrangement, LineHold, SerialParams, UsbIdentity
-from comtee.usb_serial import PortBusy, PortSnapshot, UsbSerial, usb_identity_paths
+from comtee import (
+    BluetoothIdentity,
+    Comtee,
+    LineArrangement,
+    LineHold,
+    SerialParams,
+    UsbIdentity,
+)
+from comtee.usb_serial import (
+    PortBusy,
+    PortSnapshot,
+    UsbSerial,
+    scan_serial_ports,
+    serial_identity_paths,
+    usb_identity_paths,
+)
 
 
 def test_蓝牙虚拟口不出现在设备列表() -> None:
@@ -33,8 +47,121 @@ def test_蓝牙虚拟口不出现在设备列表() -> None:
     assert found == {UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123"): "COM6"}
 
 
+def test_扫描结果区分可用USB蓝牙和缺少身份的口() -> None:
+    """扫描要分别保留 USB、蓝牙与无稳定身份口的数量。"""
+    ftdi = PortSnapshot(
+        path="COM6",
+        vid=0x0403,
+        pid=0x6001,
+        serial="FT123",
+        hwid="USB VID:PID=0403:6001 SER=FT123",
+        description="USB Serial Port",
+    )
+    bluetooth = PortSnapshot(
+        path="COM3",
+        vid=None,
+        pid=None,
+        serial=None,
+        hwid="BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}",
+        description="Standard Serial over Bluetooth link",
+    )
+    unidentified = PortSnapshot(
+        path="COM8",
+        vid=None,
+        pid=None,
+        serial=None,
+        hwid="UNKNOWN",
+        description="Unknown serial port",
+    )
+
+    scan = scan_serial_ports((ftdi, bluetooth, unidentified))
+
+    assert scan.paths == {
+        UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123"): "COM6",
+        BluetoothIdentity(
+            hwid="BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}"
+        ): "COM3",
+    }
+    assert scan.usb == 1
+    assert scan.bluetooth == 1
+    assert scan.unidentified == 1
+    assert scan.total == 3
+
+
+def test_蓝牙虚拟口按硬件标识进入设备列表() -> None:
+    """BTHENUM 硬件标识是蓝牙线路的持久身份，不再被过滤。"""
+    bluetooth = PortSnapshot(
+        path="COM7",
+        vid=None,
+        pid=None,
+        serial=None,
+        hwid=(
+            "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0046\\"
+            "8&2ECCB597&0&04220520037B_C00000000"
+        ),
+        description="Standard Serial over Bluetooth link",
+    )
+
+    identity = BluetoothIdentity(hwid=bluetooth.hwid.upper())
+
+    assert serial_identity_paths((bluetooth,)) == {identity: "COM7"}
+
+
+def test_跳过本机入站蓝牙虚拟口仅保留出站口() -> None:
+    """Windows 入站 SPP（全零地址）不能用于出站连接，只保留出站口。"""
+    incoming = PortSnapshot(
+        path="COM3",
+        vid=None,
+        pid=None,
+        serial=None,
+        hwid=(
+            "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0000\\"
+            "8&2ECCB597&0&000000000000_00000000"
+        ),
+        description="蓝牙链接上的标准串行 (COM3)",
+    )
+    outgoing = PortSnapshot(
+        path="COM5",
+        vid=None,
+        pid=None,
+        serial=None,
+        hwid=(
+            "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0046\\"
+            "8&2ECCB597&0&04220520037B_C00000000"
+        ),
+        description="蓝牙链接上的标准串行 (COM5)",
+    )
+
+    scan = scan_serial_ports((incoming, outgoing))
+
+    expected_identity = BluetoothIdentity(hwid=outgoing.hwid.upper())
+    assert serial_identity_paths((incoming, outgoing)) == {expected_identity: "COM5"}
+    assert scan.paths == {expected_identity: "COM5"}
+    assert scan.bluetooth == 1
+    assert scan.unidentified == 1
+
+
+def test_非BTHENUM但描述含Bluetooth的串口不按蓝牙身份纳入() -> None:
+    """没有 BTHENUM 的串口即使描述带 Bluetooth，也计入无稳定身份口。"""
+    fake_bt = PortSnapshot(
+        path="COM12",
+        vid=None,
+        pid=None,
+        serial=None,
+        hwid="ROOT\\PORTS\\0001",
+        description="Bluetooth Virtual Serial",
+    )
+
+    scan = scan_serial_ports((fake_bt,))
+
+    assert scan.paths == {}
+    assert scan.usb == 0
+    assert scan.bluetooth == 0
+    assert scan.unidentified == 1
+
+
 def test_带VID的蓝牙虚拟口也丢掉() -> None:
-    """跳过蓝牙不靠「没有 VID」，BTHENUM 本身就要丢。"""
+    """USB 专用查询仍跳过蓝牙，不把蓝牙冒充成 USB 身份。"""
     bluetooth = PortSnapshot(
         path="COM4",
         vid=0x0A12,
@@ -211,6 +338,48 @@ def test_按USB身份打开且COM变了仍打开新路径() -> None:
     adapter.release(device)
     assert adapter.occupy(device, SerialParams()) == LineHold.HELD
     assert opened == ["COM6", "COM9"]
+
+
+def test_按蓝牙硬件身份打开且COM变了仍打开新路径() -> None:
+    """蓝牙重枚举后 COM 改变，线路仍按 BTHENUM 身份找到它。"""
+    hwid = (
+        "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0046\\"
+        "8&2ECCB597&0&04220520037B_C00000000"
+    )
+    device = BluetoothIdentity(hwid=hwid)
+    ports = [
+        PortSnapshot(
+            path="COM7",
+            vid=None,
+            pid=None,
+            serial=None,
+            hwid=hwid,
+            description="Standard Serial over Bluetooth link",
+        )
+    ]
+    opened: list[str] = []
+
+    def list_ports() -> list[PortSnapshot]:
+        return list(ports)
+
+    def open_port(path: str, _params: SerialParams) -> _Handle:
+        opened.append(path)
+        return _Handle(path)
+
+    adapter = UsbSerial(list_ports, open_port)
+    assert adapter.occupy(device, SerialParams()) == LineHold.HELD
+    ports[0] = PortSnapshot(
+        path="COM11",
+        vid=None,
+        pid=None,
+        serial=None,
+        hwid=hwid.lower(),
+        description="Standard Serial over Bluetooth link",
+    )
+    adapter.release(device)
+
+    assert adapter.occupy(device, SerialParams()) == LineHold.HELD
+    assert opened == ["COM7", "COM11"]
 
 
 def test_真设备被占用时线路是占用冲突() -> None:

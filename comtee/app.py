@@ -9,7 +9,7 @@ from nicegui import app, native, ui
 
 from comtee.agent import AgentPipe
 from comtee.autostart import PreferredAutoStart, windows_autostart
-from comtee.hub import Comtee, UsbIdentity
+from comtee.hub import Comtee
 from comtee.line_edit import tray_menu
 from comtee.native_window import install_hide_on_close
 from comtee.panel import build_panel
@@ -17,7 +17,7 @@ from comtee.persist import FileArrangementStore, UserSettings
 from comtee.runtime import launch_command
 from comtee.singleton import InstanceLock
 from comtee.telnet import TelnetEntries
-from comtee.usb_serial import UsbSerial, windows_usb_serial
+from comtee.usb_serial import SerialScan, UsbSerial, windows_usb_serial
 
 _TITLE = "串通"
 _MUTEX = "comtee"
@@ -47,9 +47,9 @@ def run() -> None:
     autostart.apply_on_launch()
     tray_holder: dict[str, object] = {}
 
-    def list_paths() -> dict[UsbIdentity, str]:
-        """现场 USB 身份到此刻 COM 路径。"""
-        return adapter.paths()
+    def scan_devices() -> SerialScan:
+        """现场扫描结果：可绑定 USB/蓝牙身份及被忽略串口数量。"""
+        return adapter.scan()
 
     def show_panel() -> None:
         """从托盘再打开面板。"""
@@ -89,7 +89,7 @@ def run() -> None:
 
     def open_panel() -> None:
         """画出面板根页。交给 NiceGUI 当 root，避免脚本模式把首页当 404 再跑一遍入口。"""
-        build_panel(hub, list_paths, autostart)
+        build_panel(hub, scan_devices, autostart)
 
     app.on_startup(start_tray)
     app.on_startup(agent_pipe.start)
