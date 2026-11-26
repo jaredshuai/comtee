@@ -1,11 +1,10 @@
 """串通模块缝：假设备上编排线路并占口。"""
 
-from collections.abc import Callable
-
 import pytest
 
 from comtee import (
     AgentForbidden,
+    AgentSession,
     ArrangementRejected,
     BluetoothIdentity,
     Comtee,
@@ -13,193 +12,13 @@ from comtee import (
     LineArrangement,
     LineHold,
     SerialApplyFailed,
-    SerialIdentity,
     SerialParams,
-    SerialScan,
     UsbIdentity,
+    identity_from_dict,
+    parse_identity_key,
 )
-
-
-class MemoryStore:
-    """进程内编排存档，同一实例可模拟重启后仍在的那一份。"""
-
-    def __init__(self) -> None:
-        self._lines: tuple[LineArrangement, ...] = ()
-
-    def load(self) -> tuple[LineArrangement, ...]:
-        """读出上一份线路编排。"""
-        return self._lines
-
-    def save(self, lines: tuple[LineArrangement, ...]) -> None:
-        """写入当前线路编排。"""
-        self._lines = lines
-
-
-class FakeSerial:
-    """假串口：按 USB 身份插拔、占口与放口。"""
-
-    def __init__(self) -> None:
-        self._present: set[SerialIdentity] = set()
-        self._busy: set[SerialIdentity] = set()
-        self._held: dict[SerialIdentity, SerialParams] = {}
-        self._written: dict[SerialIdentity, bytearray] = {}
-        self._ingress: dict[SerialIdentity, bytearray] = {}
-        self._listeners: dict[SerialIdentity, Callable[[bytes], None]] = {}
-        self._paths: dict[SerialIdentity, str] = {}
-        self._occupied_path: dict[SerialIdentity, str] = {}
-        self._on_change: Callable[[], None] | None = None
-        self._fail_occupy = 0
-        self._unidentified = 0
-        self.occupy_calls = 0
-        self.scan_calls = 0
-
-    def plug(self, device: SerialIdentity, path: str = "COM6") -> None:
-        """让该 USB 身份出现在现场；路径可变。"""
-        self._present.add(device)
-        self._paths[device] = path
-        self._notify()
-
-    def unplug(self, device: SerialIdentity) -> None:
-        """拔掉该 USB 身份。"""
-        self._present.discard(device)
-        self._paths.pop(device, None)
-        self._notify()
-
-    def set_unidentified(self, count: int) -> None:
-        """设置模拟枚举里被忽略的无身份串口数量。"""
-        self._unidentified = count
-
-    def scan(self) -> SerialScan:
-        """枚举此刻现场插着的可支持串口与诊断计数。"""
-        self.scan_calls += 1
-        usb = sum(1 for item in self._present if isinstance(item, UsbIdentity))
-        bluetooth = sum(
-            1 for item in self._present if isinstance(item, BluetoothIdentity)
-        )
-        return SerialScan(
-            paths={item: self._paths[item] for item in self._present},
-            usb=usb,
-            bluetooth=bluetooth,
-            unidentified=self._unidentified,
-        )
-
-    def present(self) -> frozenset[SerialIdentity]:
-        """此刻现场插着的 USB 身份。"""
-        return frozenset(self._present)
-
-    def watch(self, on_change: Callable[[], None]) -> None:
-        """登记插拔通知。"""
-        self._on_change = on_change
-
-    def path_of(self, device: SerialIdentity) -> str:
-        """此刻枚举到的路径。"""
-        return self._paths[device]
-
-    def occupied_path(self, device: SerialIdentity) -> str:
-        """最近一次占口时用的路径。"""
-        return self._occupied_path[device]
-
-    def _notify(self) -> None:
-        """有人在听时上报插拔。"""
-        if self._on_change is not None:
-            self._on_change()
-
-    def mark_busy(self, device: SerialIdentity) -> None:
-        """模拟设备已被别人占用、打不开。"""
-        self._busy.add(device)
-
-    def fail_next_occupy(self, times: int = 1) -> None:
-        """让接下来若干次占口失败，用于测参数回滚后仍恢复旧占口。"""
-        self._fail_occupy = times
-
-    def clear_busy(self, device: SerialIdentity) -> None:
-        """模拟别人放口；设备仍在场。"""
-        self._busy.discard(device)
-
-    def occupy(self, device: SerialIdentity, params: SerialParams) -> LineHold:
-        """按身份占口；不在则等待，被占则冲突。"""
-        self.occupy_calls += 1
-        if self._fail_occupy > 0:
-            self._fail_occupy -= 1
-            if device not in self._present:
-                return LineHold.WAITING
-            return LineHold.CONFLICT
-        if device not in self._present:
-            return LineHold.WAITING
-        if device in self._busy:
-            return LineHold.CONFLICT
-        self._held[device] = params
-        self._written[device] = bytearray()
-        self._occupied_path[device] = self._paths[device]
-        return LineHold.HELD
-
-    def release(self, device: SerialIdentity) -> None:
-        """放掉该设备。"""
-        self._held.pop(device, None)
-        self._written.pop(device, None)
-        self._listeners.pop(device, None)
-        self._occupied_path.pop(device, None)
-
-    def listen(self, device: SerialIdentity, on_bytes: Callable[[bytes], None]) -> None:
-        """登记设备字节回调。"""
-        self._listeners[device] = on_bytes
-
-    def write(self, device: SerialIdentity, data: bytes) -> None:
-        """记下打进设备的原字节。"""
-        self._ingress.setdefault(device, bytearray()).extend(data)
-        held = self._written.get(device)
-        if held is not None:
-            held.extend(data)
-
-    def emit(self, device: SerialIdentity, data: bytes) -> None:
-        """模拟设备打出原字节。"""
-        listener = self._listeners.get(device)
-        if listener is not None:
-            listener(data)
-
-    def written(self, device: SerialIdentity) -> bytes:
-        """取出已打进设备的原字节。"""
-        return bytes(self._written.get(device, b""))
-
-    def ingress(self, device: SerialIdentity) -> bytes:
-        """串通过适配器写下的全部字节，放口后仍保留。"""
-        return bytes(self._ingress.get(device, b""))
-
-    def is_held(self, device: SerialIdentity) -> bool:
-        """该设备此刻是否被串通占着。"""
-        return device in self._held
-
-    def held_params(self, device: SerialIdentity) -> SerialParams:
-        """当前占口使用的串口参数。"""
-        return self._held[device]
-
-
-class FakeHuman:
-    """假人端入口：可模拟绑定成功或本机端口被占。"""
-
-    def __init__(self) -> None:
-        """新建一份空的入口表。"""
-        self.listening: set[int] = set()
-        self.blocked: set[int] = set()
-        self.occupy_calls: list[int] = []
-        self.release_calls: list[int] = []
-
-    def attach(self, hub: Comtee) -> None:
-        """接到串通；本假入口不需要保留 hub。"""
-        del hub
-
-    def occupy(self, human_entry: int) -> bool:
-        """开始听该人端入口；被挡住则失败。"""
-        self.occupy_calls.append(human_entry)
-        if human_entry in self.blocked:
-            return False
-        self.listening.add(human_entry)
-        return True
-
-    def release(self, human_entry: int) -> None:
-        """停掉该人端入口。"""
-        self.release_calls.append(human_entry)
-        self.listening.discard(human_entry)
+from tests.fakes import FakeHuman, FakeSerial, MemoryStore
+from tests.fakes import plugged as _plugged
 
 
 def test_创建线路后即使没有客户端也占口() -> None:
@@ -219,13 +38,6 @@ def test_创建线路后即使没有客户端也占口() -> None:
     assert lines[0].serial_params == SerialParams()
     assert lines[0].decode == "gbk"
     assert serial.is_held(device)
-
-
-def _plugged(serial: FakeSerial, serial_number: str) -> UsbIdentity:
-    """插入一台假设备并返回其 USB 身份。"""
-    device = UsbIdentity(vid=0x0403, pid=0x6001, serial=serial_number)
-    serial.plug(device)
-    return device
 
 
 def test_两台设备不能钉同一人端入口() -> None:
@@ -1122,3 +934,83 @@ def test_刷新和扫描通过同一串口缝更新最近扫描快照() -> None:
     assert serial.scan_calls == calls_before + 2
     assert direct.unidentified == 0
     assert hub.last_scan() == direct
+
+
+def test_设备身份自带键编解码标签和字典序列化() -> None:
+    """USB 与蓝牙身份自行负责键、标签与字典读写，不泄漏给调用方做分支。"""
+    usb = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    assert usb.key() == "0403:6001|FT123"
+    assert parse_identity_key(usb.key()) == usb
+    assert usb.label() == "USB 0403:6001 · 序列号 FT123"
+    assert identity_from_dict(usb.to_dict()) == usb
+
+    bt = BluetoothIdentity(
+        hwid=r"bthenum\{00001101-0000-1000-8000-00805f9b34fb}_localmfg&0046\8&2eccb597&0&04220520037b_c00000000"
+    )
+    assert bt.key().startswith("BT|BTHENUM\\")
+    assert parse_identity_key(bt.key()) == bt
+    assert bt.label() == "蓝牙 地址 04:22:05:20:03:7B · 实例 C00000000"
+    assert identity_from_dict(bt.to_dict()) == bt
+
+    raw_bt = BluetoothIdentity(hwid=r"BTHENUM\CUSTOM_DEV")
+    assert raw_bt.label() == "蓝牙 硬件标识 CUSTOM_DEV"
+
+    with pytest.raises(ValueError, match="不支持的设备类型"):
+        identity_from_dict({"device_type": "tcp"})
+    with pytest.raises(ValueError, match="无效的蓝牙身份键"):
+        parse_identity_key("BT|   ")
+    with pytest.raises(ValueError, match="无效的设备身份键"):
+        parse_identity_key("malformed")
+
+
+def test_AgentSession直接完成双向解码与端口迁移跟随() -> None:
+    """AgentSession 统一负责按线路解码读写、冲突拒绝与端口迁移跟随。"""
+    serial = FakeSerial()
+    human = FakeHuman()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore(), human=human)
+    hub.create_line(2222, device, decode="gbk")
+    session = AgentSession(hub)
+
+    serial.emit(device, "你好".encode("gbk"))
+    read_ok = session.read(2222)
+    assert read_ok.ok is True and read_ok.text == "你好"
+
+    write_ok = session.write(2222, "中文")
+    assert write_ok.ok is True
+    assert serial.written(device) == "中文".encode("gbk")
+
+    hub.change_line(2222, new_entry=3333)
+    assert session.write(2222, "old").error == "没有这条线路"
+    assert session.write(3333, "new").ok is True
+    assert serial.written(device).endswith(b"new")
+
+    hub.remove_line(3333)
+    assert session.write(3333, "gone").error == "没有这条线路"
+    hub.create_line(3333, device, decode="utf-8")
+    assert session.write(3333, "reborn").ok is True
+    assert serial.written(device).endswith(b"reborn")
+    serial.emit(device, "重连".encode())
+    assert session.read(3333).text == "重连"
+
+    serial.unplug(device)
+    assert session.write(3333, "x").error == "等待设备，写入未发送"
+
+    session.close()
+    assert hub.list_lines()[0].agent_connected is False
+
+
+def test_串通关闭时一并释放串口占口与人端监听() -> None:
+    """shutdown 一次释放全部占口和人端监听，并允许清理后由新实例重绑。"""
+    serial = FakeSerial()
+    human = FakeHuman()
+    device = _plugged(serial, "FT123")
+    hub = Comtee(serial, MemoryStore(), human=human)
+    hub.create_line(2222, device)
+    assert 2222 in human.listening
+
+    hub.shutdown()
+
+    assert not serial.is_held(device)
+    assert 2222 not in human.listening
+    assert hub.list_lines()[0].human_listening is False

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 from comtee.hub import (
     ArrangementRejected,
-    BluetoothIdentity,
     Comtee,
     HumanEntryOccupied,
     LineHold,
@@ -17,7 +16,7 @@ from comtee.hub import (
     SerialIdentity,
     SerialParams,
     SerialScan,
-    UsbIdentity,
+    parse_identity_key,
 )
 
 ALLOWED_DATA_BITS = (5, 6, 7, 8)
@@ -439,7 +438,7 @@ class PanelSession:
             stop_bits=params.stop_bits,
             flow_control=params.flow_control,
             decode=line.decode,
-            device_key=choices.default or _identity_key(line.device),
+            device_key=choices.default or line.device.key(),
         )
         view = _to_view(line, scan)
         return EditorState(
@@ -531,8 +530,8 @@ class PanelSession:
     ) -> SaveOutcome:
         """处理新建线路提交，先核对设备未分配且在场。"""
         scan = self._hub.scan()
-        assigned = {_identity_key(item.device) for item in lines}
-        present = {_identity_key(identity) for identity in scan.paths}
+        assigned = {item.device.key() for item in lines}
+        present = {identity.key() for identity in scan.paths}
         if draft.device_key in assigned or draft.device_key not in present:
             return SaveOutcome(
                 ok=False,
@@ -547,7 +546,7 @@ class PanelSession:
         try:
             self._hub.create_line(
                 draft.port,
-                _parse_identity_key(draft.device_key),
+                parse_identity_key(draft.device_key),
                 name=draft.name,
                 serial_params=_draft_serial_params(draft),
                 decode=draft.decode,
@@ -598,10 +597,10 @@ class PanelSession:
         port_changed = draft.port != old_port
         params = _draft_serial_params(draft)
         params_changed = params != line.serial_params
-        device_changed = bool(draft.device_key) and draft.device_key != _identity_key(
-            line.device
+        device_changed = (
+            bool(draft.device_key) and draft.device_key != line.device.key()
         )
-        new_device = _parse_identity_key(draft.device_key) if device_changed else None
+        new_device = parse_identity_key(draft.device_key) if device_changed else None
         try:
             self._hub.change_line(
                 old_port,
@@ -822,7 +821,7 @@ def _to_view(line: LineStatus, scan: SerialScan) -> _LineView:
         agent_connected=line.agent_connected,
         serial_params=line.serial_params,
         decode=line.decode,
-        device_key=_identity_key(line.device),
+        device_key=line.device.key(),
         device_path=scan.paths.get(line.device, ""),
         usb_ports=scan.usb,
         bluetooth_ports=scan.bluetooth,
@@ -1269,42 +1268,10 @@ def _suggest_port(used: set[int], start: int = 2222) -> int:
     return port
 
 
-def _identity_key(identity: SerialIdentity) -> str:
-    """下拉框用的身份键，不是 COM 路径。"""
-    if isinstance(identity, BluetoothIdentity):
-        return f"BT|{identity.hwid}"
-    return f"{identity.vid:04X}:{identity.pid:04X}|{identity.serial}"
-
-
-def _usb_identity_text(identity: UsbIdentity) -> str:
-    """稳定 USB 身份的展示：VID:PID 与序列号。"""
-    vid_pid = f"{identity.vid:04X}:{identity.pid:04X}"
-    serial = identity.serial.strip()
-    if serial:
-        return f"{vid_pid} · 序列号 {serial}"
-    return vid_pid
-
-
-def _bluetooth_identity_text(identity: BluetoothIdentity) -> str:
-    """展示蓝牙硬件标识里的远端地址和服务实例。"""
-    tail = identity.hwid.rsplit("\\", 1)[-1]
-    address_part, _, instance = tail.partition("_")
-    address = address_part.rsplit("&", 1)[-1]
-    if len(address) == 12 and all(char in "0123456789ABCDEF" for char in address):
-        shown_address = ":".join(
-            address[index : index + 2] for index in range(0, len(address), 2)
-        )
-        suffix = f" · 实例 {instance}" if instance else ""
-        return f"地址 {shown_address}{suffix}"
-    return f"硬件标识 {tail}"
-
-
 def _device_option_label(path: str, identity: SerialIdentity) -> str:
     """设备选项同时给出当前 COM 路径和稳定设备身份。"""
     shown = path.strip() or "未接入"
-    if isinstance(identity, BluetoothIdentity):
-        return f"{shown} · 蓝牙 {_bluetooth_identity_text(identity)}"
-    return f"{shown} · USB {_usb_identity_text(identity)}"
+    return f"{shown} · {identity.label()}"
 
 
 def _empty_device_hint(
@@ -1349,22 +1316,20 @@ def _create_device_choices(
 ) -> _DeviceChoice:
     """创建设备下拉：过滤已分配；编辑时保留当前绑定并列出可切换设备。"""
     if current is not None:
-        current_key = _identity_key(current)
+        current_key = current.key()
         path = current_path or "未接入"
         options: dict[str, str] = {current_key: _device_option_label(path, current)}
         for identity, present_path in paths.items():
             if identity == current or identity in assigned:
                 continue
-            options[_identity_key(identity)] = _device_option_label(
-                present_path, identity
-            )
+            options[identity.key()] = _device_option_label(present_path, identity)
         return _DeviceChoice(options, current_key, None)
     options = {}
     default: str | None = None
     for identity, path in paths.items():
         if identity in assigned:
             continue
-        key = _identity_key(identity)
+        key = identity.key()
         options[key] = _device_option_label(path, identity)
         if default is None:
             default = key
@@ -1377,15 +1342,6 @@ def _create_device_choices(
             unidentified_ports=unidentified_ports,
         ),
     )
-
-
-def _parse_identity_key(text: str) -> SerialIdentity:
-    """从身份键还原 USB 或蓝牙身份。"""
-    if text.startswith("BT|"):
-        return BluetoothIdentity(hwid=text[3:])
-    vid_pid, serial = text.split("|", 1)
-    vid_s, pid_s = vid_pid.split(":", 1)
-    return UsbIdentity(vid=int(vid_s, 16), pid=int(pid_s, 16), serial=serial)
 
 
 def _listen_address(port: int) -> str:

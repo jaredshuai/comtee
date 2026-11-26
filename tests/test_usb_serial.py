@@ -3,12 +3,10 @@
 import queue
 import threading
 import time
-from collections.abc import Callable
 
 from comtee import (
     BluetoothIdentity,
     Comtee,
-    LineArrangement,
     LineHold,
     SerialParams,
     UsbIdentity,
@@ -19,12 +17,13 @@ from comtee.usb_serial import (
     UsbSerial,
     scan_serial_ports,
     serial_identity_paths,
-    usb_identity_paths,
 )
+from tests.fakes import MemoryStore
+from tests.fakes import wait_until as _wait_until
 
 
-def test_蓝牙虚拟口不出现在设备列表() -> None:
-    """枚举只留下带 VID:PID 与序列号的 USB 串口。"""
+def test_按扫描仅保留带序列号USB与有效BTHENUM设备() -> None:
+    """无序列号 USB 被归为 unidentified；常规蓝牙 BTHENUM 纳入扫描结果。"""
     ftdi = PortSnapshot(
         path="COM6",
         vid=0x0403,
@@ -33,8 +32,16 @@ def test_蓝牙虚拟口不出现在设备列表() -> None:
         hwid="USB VID:PID=0403:6001 SER=FT123",
         description="USB Serial Port",
     )
+    no_serial_usb = PortSnapshot(
+        path="COM8",
+        vid=0x0403,
+        pid=0x6001,
+        serial="",
+        hwid="USB VID:PID=0403:6001",
+        description="USB Serial Port",
+    )
     bluetooth = PortSnapshot(
-        path="COM3",
+        path="COM4",
         vid=None,
         pid=None,
         serial=None,
@@ -42,9 +49,17 @@ def test_蓝牙虚拟口不出现在设备列表() -> None:
         description="Standard Serial over Bluetooth link",
     )
 
-    found = usb_identity_paths((ftdi, bluetooth))
+    scan = scan_serial_ports((ftdi, no_serial_usb, bluetooth))
 
-    assert found == {UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123"): "COM6"}
+    assert scan.paths == {
+        UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123"): "COM6",
+        BluetoothIdentity(
+            hwid="BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}"
+        ): "COM4",
+    }
+    assert scan.usb == 1
+    assert scan.bluetooth == 1
+    assert scan.unidentified == 1
 
 
 def test_扫描结果区分可用USB蓝牙和缺少身份的口() -> None:
@@ -160,8 +175,8 @@ def test_非BTHENUM但描述含Bluetooth的串口不按蓝牙身份纳入() -> N
     assert scan.unidentified == 1
 
 
-def test_带VID的蓝牙虚拟口也丢掉() -> None:
-    """USB 专用查询仍跳过蓝牙，不把蓝牙冒充成 USB 身份。"""
+def test_带VID的蓝牙虚拟口仍按BTHENUM认成蓝牙而非USB() -> None:
+    """即使蓝牙口暴露了 VID，仍按 BTHENUM 身份纳入蓝牙而非冒充 USB。"""
     bluetooth = PortSnapshot(
         path="COM4",
         vid=0x0A12,
@@ -170,7 +185,10 @@ def test_带VID的蓝牙虚拟口也丢掉() -> None:
         hwid="BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}",
         description="Standard Serial over Bluetooth link",
     )
-    assert usb_identity_paths((bluetooth,)) == {}
+    scan = scan_serial_ports((bluetooth,))
+    assert scan.usb == 0
+    assert scan.bluetooth == 1
+    assert list(scan.paths) == [BluetoothIdentity(hwid=bluetooth.hwid)]
 
 
 def test_同一USB身份COM号变了仍认成同一台设备() -> None:
@@ -193,8 +211,8 @@ def test_同一USB身份COM号变了仍认成同一台设备() -> None:
         description="USB Serial Port",
     )
 
-    assert usb_identity_paths((first,))[device] == "COM6"
-    assert usb_identity_paths((moved,))[device] == "COM9"
+    assert serial_identity_paths((first,))[device] == "COM6"
+    assert serial_identity_paths((moved,))[device] == "COM9"
 
 
 class _Handle:
@@ -286,21 +304,6 @@ class _FailOnceThenFeedHandle(_FeedHandle):
             self._failed = True
             raise OSError("device hiccup")
         return super().read(size)
-
-
-class _MemoryStore:
-    """本文件用的进程内编排存档。"""
-
-    def __init__(self) -> None:
-        self._lines: tuple[LineArrangement, ...] = ()
-
-    def load(self) -> tuple[LineArrangement, ...]:
-        """读出上一份编排。"""
-        return self._lines
-
-    def save(self, lines: tuple[LineArrangement, ...]) -> None:
-        """写入当前编排。"""
-        self._lines = lines
 
 
 def test_按USB身份打开且COM变了仍打开新路径() -> None:
@@ -400,7 +403,7 @@ def test_真设备被占用时线路是占用冲突() -> None:
     def open_port(path: str, _params: SerialParams) -> _Handle:
         raise PortBusy(path)
 
-    hub = Comtee(UsbSerial(list_ports, open_port), _MemoryStore())
+    hub = Comtee(UsbSerial(list_ports, open_port), MemoryStore())
     hub.create_line(2222, device)
     [line] = hub.list_lines()
     assert line.hold == LineHold.CONFLICT
@@ -432,16 +435,6 @@ def _ftdi_snapshot(path: str = "COM6") -> PortSnapshot:
         hwid="USB VID:PID=0403:6001 SER=FT123",
         description="USB Serial Port",
     )
-
-
-def _wait_until(ok: Callable[[], bool], timeout: float = 1.5) -> None:
-    """等到条件成立。"""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if ok():
-            return
-        time.sleep(0.02)
-    raise AssertionError("条件一直不成立")
 
 
 def test_占口后设备输出送到listen回调() -> None:
@@ -509,20 +502,17 @@ def test_读取失败会通知对照现场() -> None:
     adapter.release(device)
 
 
-def test_读取失败后对照现场能再收到设备输出() -> None:
-    """读线程通知对照现场时自己还活着，不得挡住下一根读线程。"""
+def test_读取失败后适配器自恢复继续投递字节() -> None:
+    """读异常后无需调用方重新登记 listen，仍继续在原回调泵字节。"""
     device = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
     handle = _FailOnceThenFeedHandle("COM6")
     got: list[bytes] = []
+    notified = threading.Event()
     adapter = UsbSerial(lambda: [_ftdi_snapshot()], lambda path, _p: handle)
-
-    def on_change() -> None:
-        """对照现场时重新登记回调，模拟 Hub 在 HELD 上再 bind。"""
-        adapter.listen(device, got.append)
-
-    adapter.watch(on_change)
+    adapter.watch(notified.set)
     adapter.listen(device, got.append)
     adapter.occupy(device, SerialParams())
+    assert notified.wait(1.5)
     handle.feed(b"after-hiccup")
     _wait_until(lambda: got == [b"after-hiccup"])
     adapter.release(device)

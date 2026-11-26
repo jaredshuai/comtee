@@ -88,7 +88,6 @@ def run() -> None:
     app.on_startup(start_tray)
     app.on_startup(agent_pipe.start)
     app.on_shutdown(agent_pipe.shutdown)
-    app.on_shutdown(human.shutdown)
     app.on_shutdown(hub.shutdown)
     install_hide_on_close()
     ui.run(

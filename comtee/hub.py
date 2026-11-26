@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -46,11 +46,32 @@ class LineHold(StrEnum):
 
 @dataclass(frozen=True)
 class UsbIdentity:
-    """用 VID:PID 与序列号辨认的一台设备。"""
+    """用 VID:PID 与序列号辨认的一台 USB 设备。"""
 
     vid: int
     pid: int
     serial: str
+
+    def key(self) -> str:
+        """稳定的选项身份键，不随 COM 号改变。"""
+        return f"{self.vid:04X}:{self.pid:04X}|{self.serial}"
+
+    def label(self) -> str:
+        """面向操作员的稳定 USB 身份展示。"""
+        vid_pid = f"{self.vid:04X}:{self.pid:04X}"
+        serial = self.serial.strip()
+        if serial:
+            return f"USB {vid_pid} · 序列号 {serial}"
+        return f"USB {vid_pid}"
+
+    def to_dict(self) -> dict[str, object]:
+        """结构化字典，给编排存档和 Agent 视图共用。"""
+        return {
+            "device_type": "usb",
+            "vid": self.vid,
+            "pid": self.pid,
+            "serial": self.serial,
+        }
 
 
 @dataclass(frozen=True)
@@ -63,8 +84,62 @@ class BluetoothIdentity:
         """统一去空白并转大写，避免同一蓝牙身份大小写不一致导致失配。"""
         object.__setattr__(self, "hwid", self.hwid.strip().upper())
 
+    def key(self) -> str:
+        """稳定的选项身份键，不随 COM 号改变。"""
+        return f"BT|{self.hwid}"
+
+    def label(self) -> str:
+        """展示蓝牙硬件标识里的远端地址和服务实例。"""
+        tail = self.hwid.rsplit("\\", 1)[-1]
+        address_part, _, instance = tail.partition("_")
+        address = address_part.rsplit("&", 1)[-1]
+        if len(address) == 12 and all(char in "0123456789ABCDEF" for char in address):
+            shown_address = ":".join(
+                address[index : index + 2] for index in range(0, len(address), 2)
+            )
+            suffix = f" · 实例 {instance}" if instance else ""
+            return f"蓝牙 地址 {shown_address}{suffix}"
+        return f"蓝牙 硬件标识 {tail}"
+
+    def to_dict(self) -> dict[str, object]:
+        """结构化字典，给编排存档和 Agent 视图共用。"""
+        return {
+            "device_type": "bluetooth",
+            "hwid": self.hwid,
+        }
+
 
 SerialIdentity = UsbIdentity | BluetoothIdentity
+
+
+def parse_identity_key(text: str) -> SerialIdentity:
+    """从选项身份键还原 USB 或蓝牙设备身份。"""
+    if text.startswith("BT|"):
+        hwid = text[3:].strip()
+        if not hwid:
+            raise ValueError(f"无效的蓝牙身份键: {text}")
+        return BluetoothIdentity(hwid=hwid)
+    if "|" not in text:
+        raise ValueError(f"无效的设备身份键: {text}")
+    vid_pid, serial = text.split("|", 1)
+    if ":" not in vid_pid:
+        raise ValueError(f"无效的 USB 身份键: {text}")
+    vid_s, pid_s = vid_pid.split(":", 1)
+    return UsbIdentity(vid=int(vid_s, 16), pid=int(pid_s, 16), serial=serial)
+
+
+def identity_from_dict(data: Mapping[str, object]) -> SerialIdentity:
+    """从存档字典恢复设备身份；兼容无 device_type 的旧 USB 记录。"""
+    device_type = str(data.get("device_type", "usb"))
+    if device_type == "bluetooth":
+        return BluetoothIdentity(hwid=str(data["hwid"]))
+    if device_type == "usb":
+        return UsbIdentity(
+            vid=int(str(data["vid"])),
+            pid=int(str(data["pid"])),
+            serial=str(data["serial"]),
+        )
+    raise ValueError(f"不支持的设备类型: {device_type}")
 
 
 @dataclass(frozen=True)
@@ -122,6 +197,23 @@ class SerialScan:
         return self.usb + self.bluetooth + self.unidentified
 
 
+@dataclass(frozen=True)
+class WriteResult:
+    """Agent 端按文本写入线路的结果。"""
+
+    ok: bool
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class AgentReadResult:
+    """Agent 端按文本读取线路的结果。"""
+
+    ok: bool
+    text: str = ""
+    error: str = ""
+
+
 class SerialPort(Protocol):
     """按稳定设备身份占口、放口的串口适配器。"""
 
@@ -165,8 +257,8 @@ class ArrangementStore(Protocol):
 class HumanListener(Protocol):
     """在本机回环上听人端入口。"""
 
-    def attach(self, hub: Comtee) -> None:
-        """接到串通，连上后挂客户端。"""
+    def attach(self, on_connect: Callable[[int], Client]) -> None:
+        """接到串通客户端挂接回调。"""
         ...
 
     def occupy(self, human_entry: int) -> bool:
@@ -189,15 +281,15 @@ class _Line:
     name: str = ""
     hold: LineHold = LineHold.WAITING
     human_listening: bool = True
-    clients: list[Client | Agent] = field(default_factory=list)
+    clients: list[_Endpoint] = field(default_factory=list)
     recent: bytearray = field(default_factory=bytearray)
     rx_bytes: int = 0
     tx_bytes: int = 0
     last_rx_at: float | None = None
 
 
-class Client:
-    """挂在某条线路上的一个客户端，收发明文原字节。"""
+class _Endpoint:
+    """客户端与 Agent 端共用的线路缓冲与离开基座。"""
 
     def __init__(self, hub: Comtee, human_entry: int) -> None:
         """绑定到串通上的一条线路。"""
@@ -210,14 +302,8 @@ class Client:
         """此刻这条客户端挂着的人端入口。"""
         return self._human_entry
 
-    def received(self) -> bytes:
-        """取出尚未取走的、扇出到本客户端的原字节。"""
-        data = bytes(self._inbox)
-        self._inbox.clear()
-        return data
-
     def write(self, data: bytes) -> bool:
-        """写下原字节：进设备才算成功，并出现在其他客户端。"""
+        """写下原字节：只有进设备才算成功，并扇出到同线路其他客户端。"""
         return self._hub._write_from_client(self, data)
 
     def leave(self) -> None:
@@ -229,19 +315,18 @@ class Client:
         self._inbox.extend(data)
 
 
-class Agent:
-    """挂在已有线路上的 Agent 端：读解码后的字，写原字节。"""
+class Client(_Endpoint):
+    """挂在某条线路上的人端，收发明文原字节。"""
 
-    def __init__(self, hub: Comtee, human_entry: int) -> None:
-        """绑定到指名的那条线路，串通不猜设备。"""
-        self._hub = hub
-        self._human_entry = human_entry
-        self._inbox = bytearray()
+    def received(self) -> bytes:
+        """取出尚未取走的、扇出到本客户端的原字节。"""
+        data = bytes(self._inbox)
+        self._inbox.clear()
+        return data
 
-    @property
-    def human_entry(self) -> int:
-        """此刻这条 Agent 挂着的人端入口。"""
-        return self._human_entry
+
+class Agent(_Endpoint):
+    """挂在已有线路上的 Agent 端：读写均按线路解码收发文本。"""
 
     def received(self) -> str:
         """取出尚未取走的可读字，按该线路解码。"""
@@ -249,17 +334,9 @@ class Agent:
         self._inbox.clear()
         return raw.decode(self._hub._decode_of(self._human_entry), errors="replace")
 
-    def write(self, data: bytes) -> bool:
-        """写下仍是原字节；只有进设备才算成功。"""
-        return self._hub._write_from_client(self, data)
-
-    def leave(self) -> None:
-        """离开线路，不再收到后续字节。"""
-        self._hub._detach_client(self)
-
-    def _deliver(self, data: bytes) -> None:
-        """收下扇出到本 Agent 的原字节，读时再解码。"""
-        self._inbox.extend(data)
+    def write_text(self, text: str) -> WriteResult:
+        """按线路解码把文本编成原字节写入设备，返回明确成败原因。"""
+        return self._hub._write_text_from_agent(self, text)
 
     def create_line(self, *_args: object, **_kwargs: object) -> None:
         """拒绝：Agent 不能创建线路。"""
@@ -272,6 +349,57 @@ class Agent:
     def remove_line(self, *_args: object, **_kwargs: object) -> None:
         """拒绝：Agent 不能拆线路。"""
         raise AgentForbidden("Agent 不能编排线路")
+
+
+class AgentSession:
+    """Agent 端多线路视图：管理指名挂接、双向解码读写与端口迁移跟随。"""
+
+    def __init__(self, hub: Comtee) -> None:
+        """绑定串通；进场前不占设备、不挂线路。"""
+        self._hub = hub
+        self._agents: dict[int, Agent] = {}
+
+    def list_lines(self) -> tuple[LineStatus, ...]:
+        """列出当前全部线路状态，不含设备字节。"""
+        return self._hub.list_lines()
+
+    def read(self, human_entry: int) -> AgentReadResult:
+        """指名读取该线路解码后的最近与新到文本。"""
+        try:
+            return AgentReadResult(ok=True, text=self._agent(human_entry).received())
+        except KeyError:
+            return AgentReadResult(ok=False, error="没有这条线路")
+
+    def write(self, human_entry: int, text: str) -> WriteResult:
+        """指名写入文本并按线路解码发进设备；未占口时明确失败且不排队。"""
+        try:
+            return self._agent(human_entry).write_text(text)
+        except KeyError:
+            return WriteResult(ok=False, error="没有这条线路")
+
+    def close(self) -> None:
+        """Agent 离开所有已挂线路；不放口、不拆编排。"""
+        for agent in self._agents.values():
+            agent.leave()
+        self._agents.clear()
+
+    def _agent(self, human_entry: int) -> Agent:
+        """按人端入口取已挂 Agent；入口迁移或线路拆除后自动同步。"""
+        remapped: dict[int, Agent] = {}
+        for agent in self._agents.values():
+            if self._hub._agent_attached(agent):
+                remapped[agent.human_entry] = agent
+            else:
+                agent.leave()
+        self._agents = remapped
+        if not self._hub._has_line(human_entry):
+            raise KeyError(human_entry)
+        existing = self._agents.get(human_entry)
+        if existing is not None:
+            return existing
+        agent = self._hub.attach_agent(human_entry)
+        self._agents[human_entry] = agent
+        return agent
 
 
 class Comtee:
@@ -289,7 +417,7 @@ class Comtee:
         self._human = human
         self._lines: dict[int, _Line] = {}
         if human is not None:
-            human.attach(self)
+            human.attach(self.attach_client)
         self._serial.watch(self._reconcile)
         self._last_scan: SerialScan = self._serial.scan()
         self._restore()
@@ -374,14 +502,24 @@ class Comtee:
                 raise HumanEntryOccupied(new_entry)
             pending_entry = new_entry
         try:
+            target_params = (
+                serial_params if serial_params is not None else line.serial_params
+            )
             if device_changed:
                 assert device is not None
-                target_params = (
-                    serial_params if serial_params is not None else line.serial_params
+                self._reoccupy(
+                    line,
+                    device,
+                    target_params,
+                    conflict_message="新设备正被其他程序占用，原设备绑定已保留",
                 )
-                self._switch_device(line, device, target_params)
             elif serial_params is not None and serial_params != line.serial_params:
-                self._apply_serial_params(line, serial_params)
+                self._reoccupy(
+                    line,
+                    line.device,
+                    target_params,
+                    conflict_message="新串口参数未能应用，原配置已保留",
+                )
             if decode is not None:
                 line.decode = decode
             if name is not None:
@@ -403,8 +541,11 @@ class Comtee:
         self._persist()
 
     def shutdown(self) -> None:
-        """放掉所有占口，不拆线路、不改存档。"""
+        """放掉所有占口并停听全部人端入口，不拆线路、不改存档。"""
         for line in self._lines.values():
+            if self._human is not None:
+                self._human.release(line.human_entry)
+                line.human_listening = False
             if line.hold == LineHold.HELD:
                 self._serial.release(line.device)
             line.hold = LineHold.WAITING
@@ -429,6 +570,15 @@ class Comtee:
             raise KeyError(human_entry)
         self._reconcile()
         return self._status(self._lines[human_entry])
+
+    def _has_line(self, human_entry: int) -> bool:
+        """判断指定人端入口对应的线路是否仍存在。"""
+        return human_entry in self._lines
+
+    def _agent_attached(self, agent: Agent) -> bool:
+        """判断指定 Agent 是否仍挂在对应线路上（拆后重建同一入口不算）。"""
+        line = self._lines.get(agent.human_entry)
+        return line is not None and agent in line.clients
 
     def _restore(self) -> None:
         """从存档恢复线路并再占口。"""
@@ -471,43 +621,30 @@ class Comtee:
             lambda data: self._on_device_bytes(entry, data),
         )
 
-    def _apply_serial_params(self, line: _Line, params: SerialParams) -> None:
-        """按新参数占口；失败则回到原参数，不把失败配置写盘。"""
-        old = line.serial_params
-        if line.hold == LineHold.HELD:
-            self._serial.release(line.device)
-        hold = self._serial.occupy(line.device, params)
-        if hold == LineHold.CONFLICT:
-            restored = self._serial.occupy(line.device, old)
-            line.hold = restored
-            self._bind_device(line)
-            raise SerialApplyFailed()
-        line.serial_params = params
-        line.hold = hold
-        self._bind_device(line)
-
-    def _switch_device(
+    def _reoccupy(
         self,
         line: _Line,
         new_device: SerialIdentity,
-        params: SerialParams,
+        new_params: SerialParams,
+        *,
+        conflict_message: str,
     ) -> None:
-        """改绑设备并占口；新设备冲突时尽量恢复原设备绑定。"""
+        """放掉旧占口并按新设备/参数占口；冲突时尽量恢复旧占口。"""
         old_device = line.device
         old_params = line.serial_params
         old_hold = line.hold
         if old_hold == LineHold.HELD:
             self._serial.release(old_device)
-        hold = self._serial.occupy(new_device, params)
+        hold = self._serial.occupy(new_device, new_params)
         if hold == LineHold.CONFLICT:
             if old_hold == LineHold.HELD:
                 line.hold = self._serial.occupy(old_device, old_params)
                 self._bind_device(line)
             else:
                 line.hold = old_hold
-            raise SerialApplyFailed("新设备正被其他程序占用，原设备绑定已保留")
+            raise SerialApplyFailed(conflict_message)
         line.device = new_device
-        line.serial_params = params
+        line.serial_params = new_params
         line.hold = hold
         self._bind_device(line)
 
@@ -541,9 +678,7 @@ class Comtee:
                 if line.hold == LineHold.HELD:
                     self._serial.release(line.device)
                 line.hold = LineHold.WAITING
-            elif line.hold == LineHold.HELD:
-                self._bind_device(line)
-            else:
+            elif line.hold != LineHold.HELD:
                 line.hold = self._serial.occupy(line.device, line.serial_params)
                 self._bind_device(line)
             self._retry_human_entry(line)
@@ -559,7 +694,23 @@ class Comtee:
         for client in line.clients:
             client._deliver(data)
 
-    def _write_from_client(self, client: Client | Agent, data: bytes) -> bool:
+    def _write_text_from_agent(self, agent: Agent, text: str) -> WriteResult:
+        """按线路解码将 Agent 文本写入设备；未占口时明确拒绝且不排队。"""
+        line = self._lines.get(agent._human_entry)
+        if line is None or agent not in line.clients:
+            return WriteResult(ok=False, error="没有这条线路")
+        if line.hold == LineHold.WAITING:
+            return WriteResult(ok=False, error="等待设备，写入未发送")
+        if line.hold == LineHold.CONFLICT:
+            return WriteResult(ok=False, error="占用冲突，写入未发送")
+        if line.hold != LineHold.HELD:
+            return WriteResult(ok=False, error="设备未占口，写入未发送")
+        data = text.encode(line.decode, errors="replace")
+        if not self._write_from_client(agent, data):
+            return WriteResult(ok=False, error="设备未占口，写入未发送")
+        return WriteResult(ok=True)
+
+    def _write_from_client(self, client: _Endpoint, data: bytes) -> bool:
         """客户端写入：只有占口时才进设备并扇出；失败不补发。"""
         line = self._lines.get(client._human_entry)
         if line is None or client not in line.clients:
@@ -574,7 +725,7 @@ class Comtee:
                 other._deliver(data)
         return True
 
-    def _detach_client(self, client: Client | Agent) -> None:
+    def _detach_client(self, client: _Endpoint) -> None:
         """客户端离开后不再扇出给它；线路仍占口。"""
         line = self._lines.get(client._human_entry)
         if line is None:

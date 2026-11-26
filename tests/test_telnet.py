@@ -2,13 +2,14 @@
 
 import socket
 import time
-from collections.abc import Callable
 
 import pytest
 
 from comtee import Comtee, HumanEntryOccupied, LineHold
 from comtee.telnet import TelnetEntries, TelnetFilter
-from tests.test_comtee import FakeSerial, MemoryStore, _plugged
+from tests.fakes import FakeSerial, MemoryStore
+from tests.fakes import plugged as _plugged
+from tests.fakes import wait_until as _wait_until
 
 
 def test_telnet协商字节不进设备() -> None:
@@ -165,6 +166,9 @@ def test_恢复编排时入口被占线路仍在且未监听() -> None:
         [after] = restored.list_lines()
         assert after.human_listening is True
         restored_human.listen_address(port)
+        restored.shutdown()
+        with pytest.raises(KeyError):
+            restored_human.listen_address(port)
     finally:
         if blocker is not None:
             blocker.close()
@@ -242,13 +246,3 @@ def _recv_some(sock: socket.socket, timeout: float) -> bytes:
         return b""
     except OSError:
         return b""
-
-
-def _wait_until(ok: Callable[[], bool], timeout: float = 1.5) -> None:
-    """等到条件成立。"""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if ok():
-            return
-        time.sleep(0.02)
-    raise AssertionError("条件一直不成立")

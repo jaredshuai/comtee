@@ -4,7 +4,7 @@ from pathlib import Path
 
 from comtee import BluetoothIdentity, Comtee, LineHold, UsbIdentity
 from comtee.agent import AgentBridge
-from tests.test_comtee import FakeHuman, FakeSerial, MemoryStore
+from tests.fakes import FakeHuman, FakeSerial, MemoryStore
 
 
 def test_读写必须指名线路() -> None:

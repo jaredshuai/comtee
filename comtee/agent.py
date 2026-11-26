@@ -7,25 +7,17 @@ import json
 import threading
 from typing import Any
 
-from comtee.hub import (
-    Agent,
-    AgentForbidden,
-    BluetoothIdentity,
-    Comtee,
-    LineHold,
-    LineStatus,
-)
+from comtee.hub import AgentSession, Comtee, LineHold, LineStatus
 
 PIPE_NAME = r"\\.\pipe\comtee"
 
 
 class AgentBridge:
-    """把指名请求落到已有线路上；关掉只离开，不放口、不拆线路。"""
+    """把管道指名请求翻译成 AgentSession 调用；关掉只离开，不放口、不拆线路。"""
 
     def __init__(self, hub: Comtee) -> None:
         """注入串通；不打开设备。"""
-        self._hub = hub
-        self._agents: dict[int, Agent] = {}
+        self._session = AgentSession(hub)
 
     def handle(self, request: dict) -> dict:
         """处理一条指名请求。"""
@@ -33,7 +25,7 @@ class AgentBridge:
         if op == "list":
             return {
                 "ok": True,
-                "lines": [_line_view(line) for line in self._hub.list_lines()],
+                "lines": [_line_view(line) for line in self._session.list_lines()],
             }
         if op in {"create_line", "remove_line"}:
             return {"ok": False, "error": "Agent 不能编排线路"}
@@ -42,91 +34,28 @@ class AgentBridge:
         if op in {"read", "write"} and "human_entry" not in request:
             return {"ok": False, "error": "必须指名线路"}
         if op == "read":
-            return self._read(int(request["human_entry"]))
+            read_result = self._session.read(int(request["human_entry"]))
+            if not read_result.ok:
+                return {"ok": False, "error": read_result.error}
+            return {"ok": True, "text": read_result.text}
         if op == "write":
-            return self._write(
+            write_result = self._session.write(
                 int(request["human_entry"]), str(request.get("text", ""))
             )
+            if not write_result.ok:
+                return {"ok": False, "error": write_result.error}
+            return {"ok": True}
         return {"ok": False, "error": "未知操作"}
 
     def close(self) -> None:
         """Agent 离开所有线路；不放口、不拆编排。"""
-        for agent in self._agents.values():
-            agent.leave()
-        self._agents.clear()
-
-    def _rehome_agents(self) -> None:
-        """入口迁走后，把缓存跟到新端口；旧端口不再指向这条线路。"""
-        live = {line.human_entry for line in self._hub.list_lines()}
-        remapped: dict[int, Agent] = {}
-        for agent in self._agents.values():
-            current = agent.human_entry
-            if current not in live:
-                agent.leave()
-                continue
-            remapped[current] = agent
-        self._agents = remapped
-
-    def _agent(self, human_entry: int) -> Agent:
-        """拿到指名线路上的 Agent；没有则进场。"""
-        self._rehome_agents()
-        if human_entry not in {line.human_entry for line in self._hub.list_lines()}:
-            raise KeyError(human_entry)
-        existing = self._agents.get(human_entry)
-        if existing is not None:
-            return existing
-        agent = self._hub.attach_agent(human_entry)
-        self._agents[human_entry] = agent
-        return agent
-
-    def _read(self, human_entry: int) -> dict:
-        """读出该线路解码后的字。"""
-        try:
-            text = self._agent(human_entry).received()
-        except KeyError:
-            return {"ok": False, "error": "没有这条线路"}
-        except AgentForbidden as exc:
-            return {"ok": False, "error": str(exc)}
-        return {"ok": True, "text": text}
-
-    def _write(self, human_entry: int, text: str) -> dict:
-        """按该线路解码把字写成原字节打进去。"""
-        try:
-            decode = self._decode_of(human_entry)
-            sent = self._agent(human_entry).write(text.encode(decode, errors="replace"))
-        except KeyError:
-            return {"ok": False, "error": "没有这条线路"}
-        except AgentForbidden as exc:
-            return {"ok": False, "error": str(exc)}
-        if not sent:
-            return {"ok": False, "error": self._write_rejected(human_entry)}
-        return {"ok": True}
-
-    def _write_rejected(self, human_entry: int) -> str:
-        """未占口写入必须明确失败，不得让调用方当成已发送。"""
-        for line in self._hub.list_lines():
-            if line.human_entry == human_entry:
-                if line.hold == LineHold.WAITING:
-                    return "等待设备，写入未发送"
-                if line.hold == LineHold.CONFLICT:
-                    return "占用冲突，写入未发送"
-                break
-        return "设备未占口，写入未发送"
-
-    def _decode_of(self, human_entry: int) -> str:
-        """指名线路当前的解码。"""
-        for line in self._hub.list_lines():
-            if line.human_entry == human_entry:
-                return line.decode
-        raise KeyError(human_entry)
+        self._session.close()
 
 
 def _line_view(line: LineStatus) -> dict:
     """列出状态时不带设备字节。"""
-    device = line.device
-    result = {
+    result: dict[str, object] = {
         "human_entry": line.human_entry,
-        "device_type": "bluetooth" if isinstance(device, BluetoothIdentity) else "usb",
         "hold": line.hold,
         "decode": line.decode,
         "human_clients": line.human_clients,
@@ -135,16 +64,7 @@ def _line_view(line: LineStatus) -> dict:
         "human_listening": line.human_listening,
         "writable": line.hold == LineHold.HELD,
     }
-    if isinstance(device, BluetoothIdentity):
-        result["hwid"] = device.hwid
-    else:
-        result.update(
-            {
-                "vid": device.vid,
-                "pid": device.pid,
-                "serial": device.serial,
-            }
-        )
+    result.update(line.device.to_dict())
     return result
 
 

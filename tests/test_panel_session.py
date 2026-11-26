@@ -9,7 +9,7 @@ from comtee import (
     UsbIdentity,
 )
 from comtee.panel_session import Draft, PanelSession
-from tests.test_comtee import FakeHuman, FakeSerial, MemoryStore
+from tests.fakes import FakeHuman, FakeSerial, MemoryStore
 
 
 def _session() -> tuple[FakeSerial, FakeHuman, Comtee, PanelSession]:

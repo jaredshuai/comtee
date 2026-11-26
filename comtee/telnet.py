@@ -3,7 +3,9 @@
 import contextlib
 import socket
 import threading
-from typing import Any
+from collections.abc import Callable
+
+from comtee.hub import Client
 
 IAC = 255
 DONT = 254
@@ -132,19 +134,21 @@ class TelnetEntries:
 
     def __init__(self) -> None:
         """只绑 127.0.0.1。"""
-        self._hub: Any = None
+        self._attach: Callable[[int], Client] | None = None
         self._servers: dict[int, _Listener] = {}
 
-    def attach(self, hub: Any) -> None:
-        """接到串通，连上后挂客户端。"""
-        self._hub = hub
+    def attach(self, on_connect: Callable[[int], Client]) -> None:
+        """接到串通客户端挂接回调。"""
+        self._attach = on_connect
 
     def occupy(self, human_entry: int) -> bool:
         """开始听该人端入口；端口被占则不听并返回 False。"""
         if human_entry in self._servers:
             return True
+        if self._attach is None:
+            raise RuntimeError("TelnetEntries 未接到串通")
         try:
-            listener = _Listener("127.0.0.1", human_entry, self._hub)
+            listener = _Listener("127.0.0.1", human_entry, self._attach)
         except OSError:
             return False
         listener.start()
@@ -171,9 +175,14 @@ class TelnetEntries:
 class _Listener:
     """一条人端入口上的听端口。"""
 
-    def __init__(self, host: str, port: int, hub: Any) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        on_connect: Callable[[int], Client],
+    ) -> None:
         """绑回环并准备接受多个 Telnet。"""
-        self._hub = hub
+        self._on_connect = on_connect
         self._stop = threading.Event()
         self._pumps: list[_Pump] = []
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -181,6 +190,9 @@ class _Listener:
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         self._sock.bind((host, port))
         self._sock.listen(8)
+        bound_host, bound_port = self._sock.getsockname()[:2]
+        self._host = str(bound_host)
+        self._port = int(bound_port)
         self._sock.settimeout(0.2)
         self._thread = threading.Thread(target=self._accept, daemon=True)
 
@@ -190,8 +202,7 @@ class _Listener:
 
     def address(self) -> tuple[str, int]:
         """套接字绑着的主机和端口。"""
-        host, port = self._sock.getsockname()[:2]
-        return str(host), int(port)
+        return self._host, self._port
 
     def close(self) -> None:
         """停听并断开本入口上的 Telnet。"""
@@ -211,7 +222,11 @@ class _Listener:
                 continue
             except OSError:
                 break
-            pump = _Pump(conn, self._hub, self._sock.getsockname()[1])
+            if self._stop.is_set():
+                with contextlib.suppress(OSError):
+                    conn.close()
+                break
+            pump = _Pump(conn, self._on_connect, self._port)
             self._pumps.append(pump)
             pump.start()
 
@@ -219,10 +234,15 @@ class _Listener:
 class _Pump:
     """一个 Telnet 套接字与一条线路上的客户端之间泵字节。"""
 
-    def __init__(self, conn: Any, hub: Any, human_entry: int) -> None:
+    def __init__(
+        self,
+        conn: socket.socket,
+        on_connect: Callable[[int], Client],
+        human_entry: int,
+    ) -> None:
         """挂上线路并准备读写。"""
         self._conn = conn
-        self._hub = hub
+        self._on_connect = on_connect
         self._human_entry = human_entry
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -240,7 +260,7 @@ class _Pump:
 
     def _run(self) -> None:
         """协商留在套接字上，应用数据进线路。"""
-        client = self._hub.attach_client(self._human_entry)
+        client = self._on_connect(self._human_entry)
         session = TelnetFilter()
         self._conn.settimeout(0.05)
         try:

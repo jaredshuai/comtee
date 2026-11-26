@@ -3,6 +3,8 @@
 from comtee.hub import (
     Agent,
     AgentForbidden,
+    AgentReadResult,
+    AgentSession,
     ArrangementRejected,
     ArrangementStore,
     BluetoothIdentity,
@@ -18,11 +20,16 @@ from comtee.hub import (
     SerialPort,
     SerialScan,
     UsbIdentity,
+    WriteResult,
+    identity_from_dict,
+    parse_identity_key,
 )
 
 __all__ = [
     "Agent",
     "AgentForbidden",
+    "AgentReadResult",
+    "AgentSession",
     "ArrangementRejected",
     "ArrangementStore",
     "BluetoothIdentity",
@@ -38,4 +45,7 @@ __all__ = [
     "SerialPort",
     "SerialScan",
     "UsbIdentity",
+    "WriteResult",
+    "identity_from_dict",
+    "parse_identity_key",
 ]
