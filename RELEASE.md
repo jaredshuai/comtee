@@ -72,19 +72,20 @@ Agent 端 MCP 不打进安装包，仍用源码 `python -m comtee.mcp` 去连已
 
 ## 云端门禁与发版
 
-本机试打安装包不是发版。发版动作是：`pyproject.toml` 版本已改到位，合进 `main`，再打并推送 **`vX.Y.Z`**。标签去掉 `v` 必须和 `project.version` 相同，对不上 Release 作业会失败。
+本机试打安装包不是发版。版本打标动作是：`pyproject.toml` 版本已改到位，合进 `main`，再打并推送 **`vX.Y.Z`**（标签去掉 `v` 必须和 `project.version` 相同）。推送 tag 仅记录 Git 版本里程碑，**不会自动触发 Nuitka 打包或 GitHub Release**。
 
 ```powershell
 git checkout main
 git pull
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "v0.1.1"
+git push origin v0.1.1
 ```
 
 流水线：
 
 - `CI`：`main` 的 push 和所有 pull request。Windows runner 跑 ruff / ty / pytest。不跑 Nuitka。
-- `Release`：推送 `v*.*.*` 后跑门禁、Nuitka、Inno，用提交历史生成说明，把 `Comtee-Setup-<version>.exe` 挂到 GitHub Release。
-- 同一份 `Release` 也可 `workflow_dispatch`：只打安装包并上传制品，不建 Release，用来试云端打包。
+- `Release`：仅限手工触发 `workflow_dispatch`：
+  - `publish_release=false`（默认）：跑门禁、Nuitka、Inno，只上传安装包制品，不建 GitHub Release。
+  - `publish_release=true`：校验存在匹配 `pyproject.toml` 版本的 `vX.Y.Z` tag 后跑打包，用提交历史生成说明并把 `Comtee-Setup-<version>.exe` 挂到 GitHub Release。
 
 不要手写 `CHANGELOG.md`；Release 说明由标签区间的提交生成。Agent 端 MCP 仍不进安装包。

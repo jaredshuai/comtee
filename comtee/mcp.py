@@ -49,7 +49,7 @@ def dispatch(message: dict, call: Callable[[dict], dict]) -> dict | None:
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "comtee", "version": "0.1.0"},
+                "serverInfo": {"name": "comtee", "version": "0.1.1"},
             },
         )
     if method == "notifications/initialized":

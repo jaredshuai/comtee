@@ -1,6 +1,6 @@
 [project]
 name = "comtee"
-version = "0.1.0"
+version = "0.1.1"
 description = "串通：常驻串口三通。人走本机 Telnet，Agent 走命名管道，NiceGUI 管理面板。"
 requires-python = ">=3.14"
 dependencies = [

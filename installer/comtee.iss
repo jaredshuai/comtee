@@ -1,6 +1,6 @@
 ; 串通安装包。版本由 installer/build.ps1 以 /DMyAppVersion= 传入。
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.1.1"
 #endif
 #ifndef MyAppDistDir
   #define MyAppDistDir "dist\comtee.dist"

@@ -1,12 +1,16 @@
-# 正式发版：推 vX.Y.Z 标签后，在 Windows runner 上跑本机同一套打包脚本，再挂到 GitHub Release。
-# 手工 workflow_dispatch 只打安装包、上传制品，不建 Release，用来试云端打包。
+# 安装包构建与发版仅保留手工触发：推 vX.Y.Z tag 不自动跑 Nuitka 或发 Release。
+# workflow_dispatch（publish_release=false）：只打安装包并上传制品，不建 Release。
+# workflow_dispatch（publish_release=true）：核对存在匹配当前版本的 vX.Y.Z tag 后打安装包并发布 GitHub Release。
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish GitHub Release for current pyproject version (requires matching vX.Y.Z tag)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -26,6 +30,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-tags: true
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
@@ -44,8 +50,20 @@ jobs:
           uv run pytest
 
       - name: Check tag matches project version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: uv run python -m comtee.release_tag --tag "${{ github.ref }}"
+        id: version
+        if: inputs.publish_release == true
+        run: |
+          $version = (uv run python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])").Trim()
+          $tagCommit = (git rev-parse --verify "refs/tags/v$version^{}").Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "Missing matching tag v$version for GitHub Release"
+          }
+          $headCommit = (git rev-parse HEAD).Trim()
+          if ($tagCommit -ne $headCommit) {
+            throw "Tag v$version ($tagCommit) does not point to HEAD ($headCommit)"
+          }
+          uv run python -m comtee.release_tag --tag "v$version"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Enable MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -64,7 +82,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: inputs.publish_release == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -73,6 +91,5 @@ jobs:
           if (-not $setup) {
             throw "Comtee-Setup-*.exe not found"
           }
-          $version = uv run python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
-          $version = $version.Trim()
-          gh release create "${{ github.ref_name }}" $setup.FullName --generate-notes --title "串通 $version"
+          $version = "${{ steps.version.outputs.version }}"
+          gh release create "v$version" $setup.FullName --generate-notes --title "串通 $version"
