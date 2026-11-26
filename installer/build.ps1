@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
   Build standalone with Nuitka, then Inno Setup installer.

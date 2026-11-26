@@ -27,3 +27,11 @@
 | `RELEASE.md` | 发版规范 | `current` | lazypack-setup | Conventional Commits 与 SemVer 发版纪律 |
 | `docs/agents/roles.md` | 角色映射 | `current` | lazypack-setup | 六角色职责与防撞车边界 |
 <!-- lazypack:end block=artifacts-register -->
+
+## 项目产物补充登记
+
+| 产物相对路径 | 类别 | 状态 | 来源/对应票/ADR | 说明 |
+|---|---|---|---|---|
+| `CONTEXT.md` | 领域词汇表 | `current` | #1 | 单上下文领域语言与禁用词表 |
+| `docs/adr/0001-0008` | 架构决策 | `current` | #1 | 核心机制 ADR（设备身份、端口持有、持久化、自启等） |
+| `scripts/check.ps1` | 质量门禁脚本 | `current` | 复盘收敛 | PowerShell 7 四道质量门禁统一入口 |

@@ -709,7 +709,6 @@ def empty_device_hint(
     *,
     present: int,
     available: int,
-    bluetooth_ports: int = 0,
     unidentified_ports: int = 0,
 ) -> DeviceHint | None:
     """打开创建流程时，没有可选设备就给出可行动提示。"""
@@ -743,14 +742,12 @@ def apply_device_rescan(
     assigned: set[SerialIdentity],
     draft: Draft,
     *,
-    bluetooth_ports: int = 0,
     unidentified_ports: int = 0,
 ) -> RescanResult:
     """按现场重新枚举设备；只更新设备选项，不改名称、端口和串口参数。"""
     choices = create_device_choices(
         paths,
         assigned,
-        bluetooth_ports=bluetooth_ports,
         unidentified_ports=unidentified_ports,
     )
     if choices.default:
@@ -764,7 +761,6 @@ def create_device_choices(
     *,
     current: SerialIdentity | None = None,
     current_path: str = "",
-    bluetooth_ports: int = 0,
     unidentified_ports: int = 0,
 ) -> DeviceChoice:
     """创建设备下拉：过滤已分配；编辑时保留当前绑定并列出可切换设备。"""
@@ -794,7 +790,6 @@ def create_device_choices(
         empty_device_hint(
             present=len(paths),
             available=len(options),
-            bluetooth_ports=bluetooth_ports,
             unidentified_ports=unidentified_ports,
         ),
     )

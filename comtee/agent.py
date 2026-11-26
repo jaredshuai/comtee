@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 from typing import Any
@@ -270,10 +271,8 @@ class AgentPipe:
     def shutdown(self) -> None:
         """停听；唤醒可能堵在 ConnectNamedPipe 上的线程。"""
         self._stop.set()
-        try:
+        with contextlib.suppress(OSError):
             PipeClient(self._name).close()
-        except OSError:
-            pass
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 

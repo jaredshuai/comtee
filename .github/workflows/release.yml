@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 120
     defaults:
       run:
-        shell: powershell
+        shell: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,7 +54,7 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       - name: Build installer
-        run: powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Force
+        run: pwsh -NoProfile -File installer/build.ps1 -Force
 
       - name: Upload setup artifact
         uses: actions/upload-artifact@v4

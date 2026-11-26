@@ -23,3 +23,9 @@
 - 执行者提交代码时，必须同步 diff 涉及的文档行（§7.1）。
 - 需求方或维护者变更决议时，新决议先进 `grill-with-docs`，落 ADR 并更新产物登记册状态（§7.3）。
 <!-- lazypack:end block=coding-standards -->
+
+## 项目补充审查规则 (comtee)
+
+1. **审查者独立复跑门禁**：执行 `/code-review` 时，Standards 审查者须独立运行 `pwsh -NoProfile -File scripts/check.ps1`，并在报告末尾附四项门禁实跑状态（`pass` / `fail` / `not-run + 原因`）；本条优先于通用 review 技能的「跳过工具检查」指引。
+2. **文档、UI 引导与实现闭环**：修改 ADR、`CONTEXT.md` 或面板引导文案声称支持的操作时，核对对应的可交互控件与领域层方法已真实接通。
+3. **持久化判别值显式校验**：新增持久化判别字段（如 `device_type`）时，反序列化须对未知值显式抛 `ValueError`，并在身份对象构造入口规范化主键格式。

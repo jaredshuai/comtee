@@ -46,13 +46,13 @@
 - Windows 11（自带 WebView2）。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer/build.ps1
-powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Stage nuitka
-powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Stage inno
-powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Stage nuitka -Force
-powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Stage inno -Force
-powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Force
-powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Clean
+pwsh -NoProfile -File installer/build.ps1
+pwsh -NoProfile -File installer/build.ps1 -Stage nuitka
+pwsh -NoProfile -File installer/build.ps1 -Stage inno
+pwsh -NoProfile -File installer/build.ps1 -Stage nuitka -Force
+pwsh -NoProfile -File installer/build.ps1 -Stage inno -Force
+pwsh -NoProfile -File installer/build.ps1 -Force
+pwsh -NoProfile -File installer/build.ps1 -Clean
 ```
 
 阶段标记在 `installer/.build-state/*.ok`。标记在、产物还在、版本没变，就跳过该阶段。失败不会清掉已经成功的阶段。已有 `main.dist` / 安装包但还没有标记时，脚本会补写 `.ok`，不会重打。

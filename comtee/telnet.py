@@ -1,5 +1,6 @@
 """标准 Telnet：协商留在人端入口，不进设备。"""
 
+import contextlib
 import socket
 import threading
 from typing import Any
@@ -195,10 +196,8 @@ class _Listener:
     def close(self) -> None:
         """停听并断开本入口上的 Telnet。"""
         self._stop.set()
-        try:
+        with contextlib.suppress(OSError):
             self._sock.close()
-        except OSError:
-            pass
         for pump in list(self._pumps):
             pump.close()
         self._thread.join(timeout=2.0)
@@ -235,10 +234,8 @@ class _Pump:
     def close(self) -> None:
         """断开这个 Telnet。"""
         self._stop.set()
-        try:
+        with contextlib.suppress(OSError):
             self._conn.close()
-        except OSError:
-            pass
         self._thread.join(timeout=2.0)
 
     def _run(self) -> None:
@@ -270,7 +267,5 @@ class _Pump:
                     self._conn.sendall(session.encode(outgoing))
         finally:
             client.leave()
-            try:
+            with contextlib.suppress(OSError):
                 self._conn.close()
-            except OSError:
-                pass

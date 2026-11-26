@@ -30,3 +30,9 @@
 | **书记员** | `retro` 文档部分 | 技能已安装；关票后事件驱动；本会话未实测调用 [未验证] |
 | **清道夫** | 暂无专用 skill，依据 DECISIONS §4.1 执行 | 暂无专用 skill，规则/人工执行 (发版前事件驱动调用) [人工执行] |
 <!-- lazypack:end block=agent-roles -->
+
+## 本机实测状态补充
+
+- **Skills 安装路径**：`~/.gemini/config/skills`
+- **本机已实测调用的 Skill**：`ask-matt`、`code-review`、`tdd`、`domain-modeling`、`retro`、`writing-for-agents`
+- **已验证门禁入口**：`pwsh -NoProfile -File scripts/check.ps1`（`ruff format --check`、`ruff check`、`ty check`、`pytest`）

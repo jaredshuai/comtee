@@ -901,7 +901,7 @@ class Panel:
 
     def _refresh_impact(self, line: LineStatus | None) -> None:
         """随输入更新串口格式预览和保存影响。"""
-        draft = self._read_draft(line)
+        draft = self._read_draft()
         if draft is None:
             return
         view = self._view_of(line) if line is not None else None
@@ -919,7 +919,7 @@ class Panel:
     def _rescan_create_devices(self) -> None:
         """弹窗内重新读取现场串口设备，不重建已填表单。"""
         used = {item.human_entry for item in self._hub.list_lines()}
-        draft = self._read_draft(None)
+        draft = self._read_draft()
         if draft is None:
             draft = default_create_draft(suggest_port(used))
         assigned = {item.device for item in self._hub.list_lines()}
@@ -928,7 +928,6 @@ class Panel:
             scan.paths,
             assigned,
             draft,
-            bluetooth_ports=scan.bluetooth,
             unidentified_ports=scan.unidentified,
         )
         self._apply_create_device_rescan(result)
@@ -967,7 +966,7 @@ class Panel:
         )
         self._form["subtitle"].set_text("先接入 USB 转接器或配对蓝牙串口，再创建线路。")
 
-    def _read_draft(self, line: LineStatus | None) -> Draft | None:
+    def _read_draft(self) -> Draft | None:
         """从对话框控件读出一份草稿；尚未画完则空。"""
         try:
             port_raw = self._form["port"].value
@@ -998,7 +997,7 @@ class Panel:
 
     def _save_editor(self, line: LineStatus | None) -> None:
         """校验后创建或保存；失败不出现半条线路。"""
-        draft = self._read_draft(line)
+        draft = self._read_draft()
         if draft is None:
             self._show_form_error("设置还没读全。", "请检查后再保存。")
             return
@@ -1132,7 +1131,6 @@ class Panel:
             return create_device_choices(
                 scan.paths,
                 assigned,
-                bluetooth_ports=scan.bluetooth,
                 unidentified_ports=scan.unidentified,
             )
         return create_device_choices(

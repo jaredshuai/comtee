@@ -51,7 +51,7 @@ run_gate() {
 
 # Gate 1: Format
 FORMAT_STATUS='wired'
-FORMAT_CMD='uv run ruff format .'
+FORMAT_CMD='uv run ruff format --check .'
 run_gate "format" "$FORMAT_STATUS" "$FORMAT_CMD"
 
 # Gate 2: Lint

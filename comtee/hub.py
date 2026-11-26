@@ -246,7 +246,7 @@ class Agent:
         """收下扇出到本 Agent 的原字节，读时再解码。"""
         self._inbox.extend(data)
 
-    def create_line(self, human_entry: int, device: UsbIdentity) -> None:
+    def create_line(self, *_args: object, **_kwargs: object) -> None:
         """拒绝：Agent 不能创建线路。"""
         raise AgentForbidden("Agent 不能编排线路")
 
@@ -254,7 +254,7 @@ class Agent:
         """拒绝：Agent 不能改串口参数或解码。"""
         raise AgentForbidden("Agent 不能改串口参数和解码")
 
-    def remove_line(self, human_entry: int) -> None:
+    def remove_line(self, *_args: object, **_kwargs: object) -> None:
         """拒绝：Agent 不能拆线路。"""
         raise AgentForbidden("Agent 不能编排线路")
 

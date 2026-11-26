@@ -95,6 +95,7 @@ def _ready() -> tuple[FakeSerial, UsbIdentity, Comtee]:
 
 def test_命名管道指名读写且关掉不放口() -> None:
     """一根命名管道可对已有线路读写；客户端断开不放口。"""
+    import contextlib
     import os
     import time
 
@@ -129,10 +130,8 @@ def test_命名管道指名读写且关掉不放口() -> None:
         assert hub.list_lines()[0].human_entry == 2222
     finally:
         if client is not None:
-            try:
+            with contextlib.suppress(OSError):
                 client.close()
-            except OSError:
-                pass
         server.shutdown()
 
 

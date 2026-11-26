@@ -14,6 +14,10 @@ Default role labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for
 
 Single-context: root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
 
+### Quality gates
+
+Run `pwsh -NoProfile -File scripts/check.ps1` (format check, lint, type check, pytest; requires PowerShell 7).
+
 <!-- lazypack:start block=resident-discipline src=DECISIONS.md@0.2.0 gen=aeb0254139bb9c52 input=709375b6aa5ab518 fp=6e5fde788e986a0d -->
 ## 工程纪律指针 (lazypack-discipline)
 
