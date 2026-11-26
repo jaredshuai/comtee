@@ -10,17 +10,18 @@ from nicegui import app, native, ui
 from comtee.agent import AgentPipe
 from comtee.autostart import PreferredAutoStart, windows_autostart
 from comtee.hub import Comtee
-from comtee.line_edit import tray_menu
 from comtee.native_window import install_hide_on_close
 from comtee.panel import build_panel
 from comtee.persist import FileArrangementStore, UserSettings
 from comtee.runtime import launch_command
 from comtee.singleton import InstanceLock
 from comtee.telnet import TelnetEntries
-from comtee.usb_serial import SerialScan, UsbSerial, windows_usb_serial
+from comtee.usb_serial import UsbSerial, windows_usb_serial
 
 _TITLE = "串通"
 _MUTEX = "comtee"
+_TRAY_OPEN = "打开面板"
+_TRAY_QUIT = "退出串通"
 
 
 def run() -> None:
@@ -47,10 +48,6 @@ def run() -> None:
     autostart.apply_on_launch()
     tray_holder: dict[str, object] = {}
 
-    def scan_devices() -> SerialScan:
-        """现场扫描结果：可绑定 USB/蓝牙身份及被忽略串口数量。"""
-        return adapter.scan()
-
     def show_panel() -> None:
         """从托盘再打开面板。"""
         window = cast(Any, app.native.main_window)
@@ -76,12 +73,9 @@ def run() -> None:
         image = Image.new("RGB", (64, 64), "#1d4ed8")
         draw = ImageDraw.Draw(image)
         draw.rectangle((10, 18, 54, 46), outline="white", width=4)
-        items = tray_menu()
         menu = pystray.Menu(
-            pystray.MenuItem(
-                items.open_panel, lambda *_args: show_panel(), default=True
-            ),
-            pystray.MenuItem(items.quit, lambda *_args: quit_app()),
+            pystray.MenuItem(_TRAY_OPEN, lambda *_args: show_panel(), default=True),
+            pystray.MenuItem(_TRAY_QUIT, lambda *_args: quit_app()),
         )
         icon = pystray.Icon("comtee", image, _TITLE, menu)
         tray_holder["icon"] = icon
@@ -89,7 +83,7 @@ def run() -> None:
 
     def open_panel() -> None:
         """画出面板根页。交给 NiceGUI 当 root，避免脚本模式把首页当 404 再跑一遍入口。"""
-        build_panel(hub, scan_devices, autostart)
+        build_panel(hub, autostart)
 
     app.on_startup(start_tray)
     app.on_startup(agent_pipe.start)

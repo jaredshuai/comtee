@@ -15,6 +15,7 @@ from comtee import (
     SerialApplyFailed,
     SerialIdentity,
     SerialParams,
+    SerialScan,
     UsbIdentity,
 )
 
@@ -48,7 +49,9 @@ class FakeSerial:
         self._occupied_path: dict[SerialIdentity, str] = {}
         self._on_change: Callable[[], None] | None = None
         self._fail_occupy = 0
+        self._unidentified = 0
         self.occupy_calls = 0
+        self.scan_calls = 0
 
     def plug(self, device: SerialIdentity, path: str = "COM6") -> None:
         """让该 USB 身份出现在现场；路径可变。"""
@@ -61,6 +64,24 @@ class FakeSerial:
         self._present.discard(device)
         self._paths.pop(device, None)
         self._notify()
+
+    def set_unidentified(self, count: int) -> None:
+        """设置模拟枚举里被忽略的无身份串口数量。"""
+        self._unidentified = count
+
+    def scan(self) -> SerialScan:
+        """枚举此刻现场插着的可支持串口与诊断计数。"""
+        self.scan_calls += 1
+        usb = sum(1 for item in self._present if isinstance(item, UsbIdentity))
+        bluetooth = sum(
+            1 for item in self._present if isinstance(item, BluetoothIdentity)
+        )
+        return SerialScan(
+            paths={item: self._paths[item] for item in self._present},
+            usb=usb,
+            bluetooth=bluetooth,
+            unidentified=self._unidentified,
+        )
 
     def present(self) -> frozenset[SerialIdentity]:
         """此刻现场插着的 USB 身份。"""
@@ -1072,3 +1093,32 @@ def test_设置里改绑新蓝牙设备时放开旧口并占住新口且写盘()
     assert line_2222.device == new_bt
     assert line_2222.hold == LineHold.HELD
     assert store.load()[0].device == new_bt
+
+
+def test_刷新和扫描通过同一串口缝更新最近扫描快照() -> None:
+    """Comtee 通过 SerialPort.scan 缓存现场扫描结果，不靠外层旁路重扫。"""
+    serial = FakeSerial()
+    usb = UsbIdentity(vid=0x0403, pid=0x6001, serial="FT123")
+    serial.plug(usb, path="COM6")
+    serial.set_unidentified(2)
+    hub = Comtee(serial, MemoryStore())
+    assert hub.last_scan().paths == {usb: "COM6"}
+    assert hub.last_scan().usb == 1
+    assert hub.last_scan().unidentified == 2
+
+    bt = BluetoothIdentity(hwid="BTHENUM\\NEW_0002")
+    serial.plug(bt, path="COM5")
+    assert hub.last_scan().paths == {usb: "COM6", bt: "COM5"}
+    assert hub.last_scan().bluetooth == 1
+
+    calls_before = serial.scan_calls
+    hub.refresh()
+    assert serial.scan_calls == calls_before + 1
+    assert hub.last_scan().paths == {usb: "COM6", bt: "COM5"}
+    assert hub.last_scan().bluetooth == 1
+
+    serial.set_unidentified(0)
+    direct = hub.scan()
+    assert serial.scan_calls == calls_before + 2
+    assert direct.unidentified == 0
+    assert hub.last_scan() == direct

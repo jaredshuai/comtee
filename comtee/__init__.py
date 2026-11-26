@@ -16,6 +16,7 @@ from comtee.hub import (
     SerialIdentity,
     SerialParams,
     SerialPort,
+    SerialScan,
     UsbIdentity,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     "SerialIdentity",
     "SerialParams",
     "SerialPort",
+    "SerialScan",
     "UsbIdentity",
 ]

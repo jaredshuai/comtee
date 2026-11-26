@@ -107,6 +107,21 @@ class LineArrangement:
     name: str = ""
 
 
+@dataclass(frozen=True)
+class SerialScan:
+    """一次串口枚举的结果：可用身份及其余被忽略的串口数量。"""
+
+    paths: dict[SerialIdentity, str]
+    usb: int = 0
+    bluetooth: int = 0
+    unidentified: int = 0
+
+    @property
+    def total(self) -> int:
+        """本次枚举看到的全部串口数量。"""
+        return self.usb + self.bluetooth + self.unidentified
+
+
 class SerialPort(Protocol):
     """按稳定设备身份占口、放口的串口适配器。"""
 
@@ -126,8 +141,8 @@ class SerialPort(Protocol):
         """把客户端写下的原字节打进设备。"""
         ...
 
-    def present(self) -> frozenset[SerialIdentity]:
-        """此刻现场插着的可支持串口身份。"""
+    def scan(self) -> SerialScan:
+        """枚举此刻现场插着的可支持串口与路径。"""
         ...
 
     def watch(self, on_change: Callable[[], None]) -> None:
@@ -276,6 +291,7 @@ class Comtee:
         if human is not None:
             human.attach(self)
         self._serial.watch(self._reconcile)
+        self._last_scan: SerialScan = self._serial.scan()
         self._restore()
 
     def create_line(
@@ -394,6 +410,15 @@ class Comtee:
             line.hold = LineHold.WAITING
             line.clients.clear()
 
+    def scan(self) -> SerialScan:
+        """重新枚举现场设备并更新最近扫描快照。"""
+        self._last_scan = self._serial.scan()
+        return self._last_scan
+
+    def last_scan(self) -> SerialScan:
+        """返回最近一次现场扫描快照，不触发新枚举。"""
+        return self._last_scan
+
     def refresh(self) -> None:
         """对照现场插着的设备，进入等待或再占口。"""
         self._reconcile()
@@ -508,7 +533,9 @@ class Comtee:
 
     def _reconcile(self) -> None:
         """对照现场：设备再占口；人端入口未听则再绑。"""
-        present = self._serial.present()
+        scan = self._serial.scan()
+        self._last_scan = scan
+        present = scan.paths
         for line in self._lines.values():
             if line.device not in present:
                 if line.hold == LineHold.HELD:

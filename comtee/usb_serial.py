@@ -14,6 +14,7 @@ from comtee.hub import (
     LineHold,
     SerialIdentity,
     SerialParams,
+    SerialScan,
     UsbIdentity,
 )
 
@@ -28,21 +29,6 @@ class PortSnapshot:
     serial: str | None
     hwid: str
     description: str
-
-
-@dataclass(frozen=True)
-class SerialScan:
-    """一次串口枚举的结果：可用身份及其余被忽略的串口数量。"""
-
-    paths: dict[SerialIdentity, str]
-    usb: int = 0
-    bluetooth: int = 0
-    unidentified: int = 0
-
-    @property
-    def total(self) -> int:
-        """本次枚举看到的全部串口数量。"""
-        return self.usb + self.bluetooth + self.unidentified
 
 
 def scan_serial_ports(ports: Iterable[PortSnapshot]) -> SerialScan:
